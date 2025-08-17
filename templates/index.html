@@ -1,0 +1,700 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MicrobiomeBot - XAI Chatbot</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .container {
+            width: 90%;
+            max-width: 1200px;
+            height: 90vh;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            display: flex;
+            overflow: hidden;
+        }
+
+        .sidebar {
+            width: 300px;
+            background: #f8f9fa;
+            border-right: 1px solid #e9ecef;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .sidebar-header {
+            padding: 20px;
+            background: #343a40;
+            color: white;
+            text-align: center;
+        }
+
+        .sidebar-header h2 {
+            margin-bottom: 5px;
+            font-size: 1.5em;
+        }
+
+        .sidebar-header p {
+            font-size: 0.9em;
+            opacity: 0.8;
+        }
+
+        .sidebar-content {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+        }
+
+        .feature-section {
+            margin-bottom: 25px;
+        }
+
+        .feature-section h3 {
+            color: #343a40;
+            margin-bottom: 10px;
+            font-size: 1.1em;
+        }
+
+        .feature-list {
+            list-style: none;
+        }
+
+        .feature-list li {
+            padding: 8px 0;
+            color: #6c757d;
+            font-size: 0.9em;
+            border-bottom: 1px solid #e9ecef;
+        }
+
+        .feature-list li:last-child {
+            border-bottom: none;
+        }
+
+        .upload-section {
+            background: #e3f2fd;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+
+        .upload-section h4 {
+            color: #1976d2;
+            margin-bottom: 10px;
+        }
+
+        .file-input {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            margin-bottom: 10px;
+        }
+
+        .btn {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            width: 100%;
+            font-size: 0.9em;
+        }
+
+        .btn:hover {
+            background: #0056b3;
+        }
+
+        .main-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .chat-header {
+            padding: 20px;
+            background: #f8f9fa;
+            border-bottom: 1px solid #e9ecef;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .chat-header h1 {
+            color: #343a40;
+            font-size: 1.8em;
+        }
+
+        .status-indicator {
+            padding: 5px 15px;
+            background: #28a745;
+            color: white;
+            border-radius: 20px;
+            font-size: 0.8em;
+        }
+
+        .chat-container {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            background: #f8f9fa;
+        }
+
+        .message {
+            margin-bottom: 20px;
+            display: flex;
+            align-items: flex-start;
+        }
+
+        .message.user {
+            justify-content: flex-end;
+        }
+
+        .message-content {
+            max-width: 70%;
+            padding: 15px 20px;
+            border-radius: 20px;
+            position: relative;
+        }
+
+        .message.user .message-content {
+            background: #007bff;
+            color: white;
+            border-bottom-right-radius: 5px;
+        }
+
+        .message.bot .message-content {
+            background: white;
+            color: #343a40;
+            border: 1px solid #e9ecef;
+            border-bottom-left-radius: 5px;
+        }
+
+        .message-avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            margin: 0 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            color: white;
+        }
+
+        .message.user .message-avatar {
+            background: #007bff;
+        }
+
+        .message.bot .message-avatar {
+            background: #28a745;
+        }
+
+        .input-container {
+            padding: 20px;
+            background: white;
+            border-top: 1px solid #e9ecef;
+            display: flex;
+            gap: 10px;
+        }
+
+        .message-input {
+            flex: 1;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 25px;
+            outline: none;
+            font-size: 1em;
+        }
+
+        .message-input:focus {
+            border-color: #007bff;
+        }
+
+        .send-btn {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 15px 25px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 1em;
+        }
+
+        .send-btn:hover {
+            background: #0056b3;
+        }
+
+        .send-btn:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+        }
+
+        .typing-indicator {
+            display: none;
+            padding: 10px 20px;
+            background: #e9ecef;
+            border-radius: 20px;
+            margin: 10px 0;
+            font-style: italic;
+            color: #6c757d;
+        }
+
+        .network-container {
+            margin: 20px 0;
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            border: 1px solid #e9ecef;
+        }
+
+        .example-queries {
+            background: #fff3cd;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+
+        .example-queries h4 {
+            color: #856404;
+            margin-bottom: 10px;
+        }
+
+        .example-query {
+            background: white;
+            padding: 8px 12px;
+            margin: 5px 0;
+            border-radius: 15px;
+            cursor: pointer;
+            font-size: 0.9em;
+            border: 1px solid #ffeaa7;
+        }
+
+        .example-query:hover {
+            background: #ffeaa7;
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                flex-direction: column;
+                height: 100vh;
+                width: 100%;
+                border-radius: 0;
+            }
+
+            .sidebar {
+                width: 100%;
+                height: auto;
+                max-height: 200px;
+            }
+
+            .message-content {
+                max-width: 85%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <h2>🧬 MicrobiomeBot</h2>
+                <p>Explainable AI for Microbiome Analysis</p>
+            </div>
+            <div class="sidebar-content">
+                <div class="upload-section">
+                    <h4>📊 Upload Data</h4>
+                    <input type="file" class="file-input" id="dataFile" accept=".csv,.tsv,.txt">
+                    <button class="btn" onclick="uploadData()">Analyze Data</button>
+                </div>
+
+                <div class="feature-section">
+                    <h3>🔍 What I Can Explain</h3>
+                    <ul class="feature-list">
+                        <li>Interaction types (Competition, Mutualism, etc.)</li>
+                        <li>Logical reasoning behind inferences</li>
+                        <li>Network topology and patterns</li>
+                        <li>Statistical significance</li>
+                        <li>Step-by-step analysis process</li>
+                    </ul>
+                </div>
+
+                <div class="feature-section">
+                    <h3>🧠 XAI Features</h3>
+                    <ul class="feature-list">
+                        <li>Abductive logic explanations</li>
+                        <li>Compression value interpretations</li>
+                        <li>Interactive network visualization</li>
+                        <li>Natural language queries</li>
+                        <li>Transparent reasoning process</li>
+                    </ul>
+                </div>
+
+                <div class="example-queries">
+                    <h4>💡 Try These Queries</h4>
+                    <div class="example-query" onclick="sendExampleQuery('What are the interaction types?')">
+                        What are the interaction types?
+                    </div>
+                    <div class="example-query" onclick="sendExampleQuery('How does the analysis work?')">
+                        How does the analysis work?
+                    </div>
+                    <div class="example-query" onclick="sendExampleQuery('Show me the network')">
+                        Show me the network
+                    </div>
+                    <div class="example-query" onclick="sendExampleQuery('Depth plot')">
+                        Depth plot
+                    </div>
+                    <div class="example-query" onclick="sendExampleQuery('help')">
+                        Help
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <div class="chat-header">
+                <h1>Microbiome Interaction Analysis</h1>
+                <div class="status-indicator" id="status">Ready</div>
+            </div>
+
+            <div class="chat-container" id="chatContainer">
+                <div class="message bot">
+                    <div class="message-avatar">🤖</div>
+                    <div class="message-content">
+                        <strong>Welcome to MicrobiomeBot!</strong><br><br>
+                        I'm an explainable AI assistant specialized in microbiome interaction analysis using the InfIntE framework. I can help you understand:
+                        <br><br>
+                        • How ecological interactions are inferred from abundance data<br>
+                        • The logical reasoning behind each interaction<br>
+                        • Network patterns and their biological significance<br>
+                        • Statistical support for each inference<br>
+                        <br>
+                        Try asking me about interaction types, uploading your data, or how the analysis works!
+                    </div>
+                </div>
+            </div>
+
+            <div class="typing-indicator" id="typingIndicator">
+                MicrobiomeBot is thinking...
+            </div>
+
+            <div class="input-container">
+                <input type="text" class="message-input" id="messageInput" 
+                       placeholder="Ask me about microbiome interactions..." 
+                       onkeypress="handleKeyPress(event)">
+                <button class="send-btn" id="sendBtn" onclick="sendMessage()">Send</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let chatHistory = [];
+        let isAnalyzing = false;
+
+        function updateStatus(message, color = '#28a745') {
+            const status = document.getElementById('status');
+            status.textContent = message;
+            status.style.background = color;
+        }
+
+        function addMessage(content, isUser = false) {
+            const chatContainer = document.getElementById('chatContainer');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${isUser ? 'user' : 'bot'}`;
+            
+            const avatar = document.createElement('div');
+            avatar.className = 'message-avatar';
+            avatar.textContent = isUser ? '' : '🤖';
+            
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'message-content';
+            
+            if (isUser) {
+                contentDiv.textContent = content;
+            } else {
+                // Convert markdown-like formatting to HTML
+                let formattedContent = content
+                    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                    .replace(/\n/g, '<br>');
+                contentDiv.innerHTML = formattedContent;
+            }
+            
+            if (isUser) {
+                messageDiv.appendChild(contentDiv);
+                messageDiv.appendChild(avatar);
+            } else {
+                messageDiv.appendChild(avatar);
+                messageDiv.appendChild(contentDiv);
+            }
+            
+            chatContainer.appendChild(messageDiv);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        function showTyping() {
+            document.getElementById('typingIndicator').style.display = 'block';
+            document.getElementById('chatContainer').scrollTop = document.getElementById('chatContainer').scrollHeight;
+        }
+
+        function hideTyping() {
+            document.getElementById('typingIndicator').style.display = 'none';
+        }
+
+        async function sendMessage() {
+            const input = document.getElementById('messageInput');
+            const message = input.value.trim();
+            
+            if (!message) return;
+            
+            addMessage(message, true);
+            input.value = '';
+            
+            showTyping();
+            updateStatus('Processing...', '#ffc107');
+            
+            try {
+                const response = await fetch('/chat', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ message: message })
+                });
+                
+                const data = await response.json();
+                
+                hideTyping();
+                addMessage(data.response);
+                
+                if (data.show_network) {
+                    await showNetwork();
+                }
+                if (data.show_depth) {
+                    await showDepth();
+                }
+                
+                updateStatus('Ready');
+                
+            } catch (error) {
+                hideTyping();
+                addMessage('Sorry, I encountered an error. Please try again.');
+                updateStatus('Error', '#dc3545');
+                console.error('Error:', error);
+            }
+        }
+
+        function sendExampleQuery(query) {
+            document.getElementById('messageInput').value = query;
+            sendMessage();
+        }
+
+        function handleKeyPress(event) {
+            if (event.key === 'Enter') {
+                sendMessage();
+            }
+        }
+
+        async function uploadData() {
+            const fileInput = document.getElementById('dataFile');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                alert('Please select a file first.');
+                return;
+            }
+
+            // If it's a depth file (e.g., depth.csv), upload it to /upload_depth
+            const name = (file.name || '').toLowerCase();
+            if (name.includes('depth')) {
+                updateStatus('Saving depth file...', '#ffc107');
+                try {
+                    const fd = new FormData();
+                    fd.append('file', file);
+                    const res = await fetch('/upload_depth', { method: 'POST', body: fd });
+                    const out = await res.json();
+                    if (!out.success) {
+                        addMessage(`Depth upload failed: ${out.error || 'unknown error'}`);
+                        updateStatus('Error', '#dc3545');
+                        return;
+                    }
+                    addMessage('Depth file uploaded successfully. Ask for a <strong>depth plot</strong> to visualize sequencing depth.');
+                    updateStatus('Ready');
+                } catch (e) {
+                    addMessage('Depth upload error. Please try again.');
+                    updateStatus('Error', '#dc3545');
+                }
+                return; // Do not run interaction analysis for depth.csv
+            }
+            
+            // Otherwise: treat as OTU/ASV table and analyze interactions
+            updateStatus('Analyzing data...', '#ffc107');
+            try {
+                const text = await file.text();
+                const lines = text.split('\n');
+                const headers = lines[0].split(/[,\t]/);
+                
+                const data = {};
+                headers.forEach(header => {
+                    data[header.trim()] = [];
+                });
+                
+                for (let i = 1; i < lines.length; i++) {
+                    if (lines[i].trim()) {
+                        const values = lines[i].split(/[,\t]/);
+                        headers.forEach((header, index) => {
+                            data[header.trim()].push(values[index] || '');
+                        });
+                    }
+                }
+                
+                const response = await fetch('/analyze', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ otu_data: data })
+                });
+                
+                const result = await response.json();
+                
+                if (result.error) {
+                    addMessage(`Analysis failed: ${result.error}`);
+                    updateStatus('Error', '#dc3545');
+                } else {
+                    addMessage(`Analysis complete! Found ${result.num_interactions} interactions. You can now ask me questions about the results or request a network visualization.`);
+                    updateStatus('Analysis Complete');
+                }
+                
+            } catch (error) {
+                addMessage('Error processing file. Please check the format and try again.');
+                updateStatus('Error', '#dc3545');
+                console.error('Upload error:', error);
+            }
+        }
+
+        async function showNetwork() {
+            try {
+                const response = await fetch('/network');
+                const data = await response.json();
+                
+                if (data.error) {
+                    addMessage(`Cannot generate network: ${data.error}`);
+                    return;
+                }
+                
+                const networkContainer = document.createElement('div');
+                networkContainer.className = 'network-container';
+                networkContainer.innerHTML = '<h3>Interaction Network</h3>';
+                
+                const plotDiv = document.createElement('div');
+                plotDiv.style.height = '400px';
+                networkContainer.appendChild(plotDiv);
+                
+                const statsDiv = document.createElement('div');
+                statsDiv.innerHTML = `
+                    <p><strong>Network Statistics:</strong></p>
+                    <p>Nodes: ${data.network_stats.nodes} | Edges: ${data.network_stats.edges}</p>
+                    <p>Density: ${data.network_stats.density.toFixed(3)} | Avg Clustering: ${data.network_stats.avg_clustering.toFixed(3)}</p>
+                `;
+                networkContainer.appendChild(statsDiv);
+                
+                document.getElementById('chatContainer').appendChild(networkContainer);
+                
+                const plotData = JSON.parse(data.plot_json);
+                Plotly.newPlot(plotDiv, plotData.data, plotData.layout, {responsive:true});
+                
+                document.getElementById('chatContainer').scrollTop = document.getElementById('chatContainer').scrollHeight;
+                
+            } catch (error) {
+                addMessage('Error generating network visualization.');
+                console.error('Network error:', error);
+            }
+        }
+
+        // NEW: show depth plots inline (same flow as network)
+        async function showDepth() {
+            try {
+                const res = await fetch('/depth');
+                const data = await res.json();
+                if (!data.success) {
+                    addMessage(`Depth viewer error: ${data.error || 'not available'}`);
+                    return;
+                }
+
+                const card = document.createElement('div');
+                card.className = 'network-container';
+                card.innerHTML = '<h3>Depth Plot Viewer</h3>';
+
+                const distDiv = document.createElement('div');
+                distDiv.style.height = '360px';
+                const cdfDiv  = document.createElement('div');
+                cdfDiv.style.height = '360px';
+                const sampDiv = document.createElement('div');
+                sampDiv.style.height = '360px';
+                const groupDiv = document.createElement('div');
+                groupDiv.style.height = '360px';
+
+                // QC summary
+                const s = data.qc_summary;
+                const qc = document.createElement('div');
+                qc.innerHTML = `
+                  <p><strong>QC Summary</strong></p>
+                  <p>Samples: ${s.n_samples} | Median: ${Math.round(s.median)} | Mean: ${Math.round(s.mean)} | Q1/Q3: ${Math.round(s.q1)}/${Math.round(s.q3)} | Low-depth threshold: ${Math.round(s.low_depth_threshold)} | Flagged: ${s.n_flagged_low_depth}</p>
+                `;
+
+                card.appendChild(qc);
+
+                const plotHdr1 = document.createElement('p'); plotHdr1.innerHTML = '<strong>Distribution</strong>';
+                const plotHdr2 = document.createElement('p'); plotHdr2.innerHTML = '<strong>Empirical CDF</strong>';
+                const plotHdr3 = document.createElement('p'); plotHdr3.innerHTML = '<strong>Per Sample (sorted)</strong>';
+                const plotHdr4 = document.createElement('p'); plotHdr4.innerHTML = '<strong>By Group (if available)</strong>';
+
+                card.appendChild(plotHdr1); card.appendChild(distDiv);
+                card.appendChild(plotHdr2); card.appendChild(cdfDiv);
+                card.appendChild(plotHdr3); card.appendChild(sampDiv);
+                card.appendChild(plotHdr4); card.appendChild(groupDiv);
+
+                document.getElementById('chatContainer').appendChild(card);
+
+                const distFig = JSON.parse(data.fig_distribution);
+                const sampFig = JSON.parse(data.fig_per_sample);
+                const cdfFig  = JSON.parse(data.fig_cdf);
+                Plotly.newPlot(distDiv, distFig.data, distFig.layout, {responsive:true});
+                Plotly.newPlot(sampDiv, sampFig.data, sampFig.layout, {responsive:true});
+                Plotly.newPlot(cdfDiv,  cdfFig.data,  cdfFig.layout,  {responsive:true});
+
+                if (data.fig_by_group) {
+                    const groupFig = JSON.parse(data.fig_by_group);
+                    Plotly.newPlot(groupDiv, groupFig.data, groupFig.layout, {responsive:true});
+                } else {
+                    groupDiv.innerHTML = '<p class="muted">No grouping column detected in <code>depth.csv</code>.</p>';
+                }
+
+                document.getElementById('chatContainer').scrollTop = document.getElementById('chatContainer').scrollHeight;
+            } catch (e) {
+                addMessage('Error loading depth plots.');
+                console.error(e);
+            }
+        }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {
+            document.getElementById('messageInput').focus();
+        });
+    </script>
+</body>
+</html>
