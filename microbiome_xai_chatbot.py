@@ -207,10 +207,51 @@ class MicrobiomeXAIChatbot:
         return summary
 
     def generate_depth_figures(self) -> Dict[str, Any]:
-        if self.depth_df is None:
+        # Check if depth file is uploaded first
+        depth_files = [f for f in self.uploaded_files['csv_files'].keys() if 'depth' in f.lower()]
+        
+        if depth_files:
+            # Use uploaded depth file
+            depth_filename = depth_files[0]
+            df = self.uploaded_files['csv_files'][depth_filename]['data'].copy()
+            
+            # Try to identify depth and sample columns
+            depth_col = None
+            sample_col = None
+            
+            for col in df.columns:
+                col_lower = col.lower()
+                if any(term in col_lower for term in ['depth', 'reads', 'count', 'size']):
+                    if pd.api.types.is_numeric_dtype(df[col]):
+                        depth_col = col
+                        break
+            
+            for col in df.columns:
+                col_lower = col.lower()
+                if any(term in col_lower for term in ['sample', 'id', 'name']):
+                    sample_col = col
+                    break
+            
+            # If we found appropriate columns, standardize them
+            if depth_col and sample_col:
+                df = df.rename(columns={depth_col: 'Depth', sample_col: 'Sample'})
+            elif depth_col:
+                df = df.rename(columns={depth_col: 'Depth'})
+                df['Sample'] = df.index.astype(str)
+            else:
+                # Fallback: assume first numeric column is depth
+                numeric_cols = df.select_dtypes(include=[np.number]).columns
+                if len(numeric_cols) > 0:
+                    df = df.rename(columns={numeric_cols[0]: 'Depth'})
+                    df['Sample'] = df.index.astype(str)
+                else:
+                    raise ValueError("No numeric depth column found in uploaded depth file")
+                    
+        elif self.depth_df is None:
             self.load_depth_csv(DEPTH_CSV_DEFAULT)
-
-        df = self.depth_df.copy()
+            df = self.depth_df.copy()
+        else:
+            df = self.depth_df.copy()
         qc = self._depth_qc_summary(df)
 
         hist = px.histogram(
@@ -891,19 +932,25 @@ Microbiome interaction networks reveal important ecological patterns:
         elif any(word in query_lower for word in ['step-by-step', 'analysis process', 'how does', 'process']):
             return self.explain_analysis_process()
         
-        # Handle network visualization requests
-        elif any(term in query_lower for term in ['network', 'visualization', 'show me the network', 'plot', 'graph', 'interactions network']):
-            if not self.current_analysis:
-                return "No analysis data available. Please upload and analyze data first."
-            return "SHOW_NETWORK"
-        
-        # Handle depth plot requests
+        # Handle depth plot requests FIRST (before network to avoid conflict with 'plot' keyword)
         depth_terms = [
             "depth plot", "show depth", "sequencing depth", "depth distribution",
             "library size", "depth visualization", "depth stats", "depth qc"
         ]
         if any(term in query_lower for term in depth_terms):
-            return "SHOW_DEPTH"
+            # Check if depth files are available
+            depth_files = [f for f in self.uploaded_files['csv_files'].keys() if 'depth' in f.lower()]
+            if depth_files or self.current_analysis:
+                return "SHOW_DEPTH"
+            else:
+                return "No depth data available. Please upload a depth.csv file or analyze microbiome data with depth information first."
+        
+        # Handle network visualization requests (more specific terms to avoid conflict)
+        elif any(term in query_lower for term in ['network', 'show me the network', 'interactions network']) or \
+             (any(term in query_lower for term in ['plot', 'graph', 'visualization']) and any(term in query_lower for term in ['interaction', 'network'])):
+            if not self.current_analysis:
+                return "No analysis data available. Please upload and analyze data first."
+            return "SHOW_NETWORK"
         
         # Handle CSV data queries only after static Q&A
         csv_response = self.handle_csv_data_query(query_lower)

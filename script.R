@@ -1,6 +1,6 @@
 
             library(InfIntE)
-            otu_data <- read.csv("C:/MicrobiomeBot/Microbot-/temp_microbiome_9743306c.csv", row.names=1, check.names=FALSE)
+            otu_data <- read.csv("C:/MicrobiomeBot/Microbot-/input.csv", row.names=1, check.names=FALSE)
             
             # Set options for Windows compatibility
             options(mc.cores = 1)
@@ -16,7 +16,7 @@
             })
             
             interactions <- result$selected_interactions
-            write.csv(interactions, "C:/MicrobiomeBot/Microbot-/interactions_9743306c.csv", row.names=FALSE)
+            write.csv(interactions, "C:/MicrobiomeBot/Microbot-/interactions.csv", row.names=FALSE)
             
             # Also save enhanced interactions with metadata
             interactions_enhanced <- data.frame(
@@ -28,5 +28,5 @@
                 Optimization_Applied = "No",
                 Analysis_Date = Sys.Date()
             )
-            write.csv(interactions_enhanced, "C:/MicrobiomeBot/Microbot-/interactions_enhanced_9743306c.csv", row.names=FALSE)
+            write.csv(interactions_enhanced, "C:/MicrobiomeBot/Microbot-/interactions_enhanced.csv", row.names=FALSE)
             
