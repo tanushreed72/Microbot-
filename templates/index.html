@@ -10,20 +10,18 @@
 
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: #ffffff;           /* full-screen app (no gradient) */
             height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
+            display: block;                /* cancel center flex */
         }
 
         .container {
-            width: 90%;
-            max-width: 1200px;
-            height: 90vh;
+            width: 100vw;                  /* full width */
+            height: 100vh;                 /* full height */
+            max-width: 100vw;
             background: white;
-            border-radius: 20px;
-            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            border-radius: 0;              /* square edges */
+            box-shadow: none;              /* no floating card */
             display: flex;
             overflow: hidden;
         }
@@ -80,9 +78,7 @@
             border-bottom: 1px solid #e9ecef;
         }
 
-        .feature-list li:last-child {
-            border-bottom: none;
-        }
+        .feature-list li:last-child { border-bottom: none; }
 
         .upload-section {
             background: #e3f2fd;
@@ -91,10 +87,7 @@
             margin-bottom: 20px;
         }
 
-        .upload-section h3 {
-            color: #1976d2;
-            margin-bottom: 10px;
-        }
+        .upload-section h3 { color: #1976d2; margin-bottom: 10px; }
 
         .file-input {
             width: 100%;
@@ -114,16 +107,9 @@
             width: 100%;
             font-size: 0.9em;
         }
+        .btn:hover { background: #0056b3; }
 
-        .btn:hover {
-            background: #0056b3;
-        }
-
-        .main-content {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-        }
+        .main-content { flex: 1; display: flex; flex-direction: column; }
 
         .chat-header {
             padding: 20px;
@@ -134,10 +120,7 @@
             align-items: center;
         }
 
-        .chat-header h1 {
-            color: #343a40;
-            font-size: 1.8em;
-        }
+        .chat-header h1 { color: #343a40; font-size: 1.8em; }
 
         .status-indicator {
             padding: 5px 15px;
@@ -152,6 +135,8 @@
             padding: 20px;
             overflow-y: auto;
             background: #f8f9fa;
+            scroll-behavior: smooth;
+            padding-bottom: 12px;
         }
 
         .message {
@@ -160,23 +145,34 @@
             align-items: flex-start;
         }
 
-        .message.user {
-            justify-content: flex-end;
-        }
+        .message.user { justify-content: flex-end; }
 
         .message-content {
             max-width: 70%;
             padding: 15px 20px;
             border-radius: 20px;
             position: relative;
+            box-sizing: border-box;
         }
+
+        /* cap very tall user bubbles so earlier messages stay visible */
+        .long-message { max-height: 40vh; overflow-y: auto; }
+
+        /* wrap rules ONLY on user bubbles */
+        .message.user .message-content {
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+
+        /* bot bubbles render normally (prevents welcome text spacing issues) */
+        .message.bot .message-content { white-space: normal; }
 
         .message.user .message-content {
             background: #007bff;
             color: white;
             border-bottom-right-radius: 5px;
         }
-
         .message.bot .message-content {
             background: white;
             color: #343a40;
@@ -185,24 +181,15 @@
         }
 
         .message-avatar {
-            width: 40px;
-            height: 40px;
+            width: 40px; height: 40px;
             border-radius: 50%;
             margin: 0 10px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: bold;
-            color: white;
+            display: flex; align-items: center; justify-content: center;
+            font-weight: bold; color: white;
+            flex-shrink: 0;
         }
-
-        .message.user .message-avatar {
-            background: #007bff;
-        }
-
-        .message.bot .message-avatar {
-            background: #28a745;
-        }
+        .message.user .message-avatar { background: #007bff; }
+        .message.bot  .message-avatar { background: #28a745; }
 
         .input-container {
             padding: 20px;
@@ -210,6 +197,7 @@
             border-top: 1px solid #e9ecef;
             display: flex;
             gap: 10px;
+            align-items: flex-end;
         }
 
         .message-input {
@@ -219,11 +207,19 @@
             border-radius: 25px;
             outline: none;
             font-size: 1em;
+            resize: none;
+            min-height: 50px;
+            max-height: 150px;
+            font-family: inherit;
+            line-height: 1.4;
+            overflow-y: auto;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            word-break: break-all;
+            overflow-wrap: break-word;
         }
-
-        .message-input:focus {
-            border-color: #007bff;
-        }
+        .message-input:focus { border-color: #007bff; }
 
         .send-btn {
             background: #007bff;
@@ -234,15 +230,8 @@
             cursor: pointer;
             font-size: 1em;
         }
-
-        .send-btn:hover {
-            background: #0056b3;
-        }
-
-        .send-btn:disabled {
-            background: #6c757d;
-            cursor: not-allowed;
-        }
+        .send-btn:hover    { background: #0056b3; }
+        .send-btn:disabled { background: #6c757d; cursor: not-allowed; }
 
         .typing-indicator {
             display: none;
@@ -268,63 +257,39 @@
             border-radius: 10px;
             margin-bottom: 20px;
         }
-
-        .example-queries h4 {
-            color: #856404;
-            margin-bottom: 10px;
-        }
+        .example-queries h4 { color: #856404; margin-bottom: 10px; }
 
         .example-query {
             background: white;
-            padding: 8px 12px;
-            margin: 5px 0;
-            border-radius: 15px;
-            cursor: pointer;
-            font-size: 0.9em;
-            border: 1px solid #ffeaa7;
+            padding: 8px 12px; margin: 5px 0;
+            border-radius: 15px; cursor: pointer;
+            font-size: 0.9em; border: 1px solid #ffeaa7;
+        }
+        .example-query:hover { background: #ffeaa7; }
+
+        #uploaded-files-list { margin-top: 20px; }
+        #files-display { padding: 10px; border: 1px solid #ddd; border-radius: 5px; }
+
+        /* legacy scroll style — left for compatibility */
+        .otu-sequence { white-space: nowrap; overflow-x: auto; display: block; max-width: 100%; }
+
+        /* NEW: wrapped sequence style */
+        .seq-wrap{
+            white-space: normal;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            font-family: ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
+            line-height: 1.3;
+            display: inline;
         }
 
-        .example-query:hover {
-            background: #ffeaa7;
-        }
-
-        .file-upload-container {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-        }
-
-        .upload-type {
-            margin-bottom: 20px;
-        }
-
-        #uploaded-files-list {
-            margin-top: 20px;
-        }
-
-        #files-display {
-            padding: 10px;
-            border: 1px solid #ddd;
-            border-radius: 5px;
-        }
+        /* long tokens in user messages (kept for compatibility if used elsewhere) */
+        .user-long-token { display: inline-block; max-width: 100%; white-space: nowrap; overflow-x: auto; vertical-align: bottom; }
 
         @media (max-width: 768px) {
-            .container {
-                flex-direction: column;
-                height: 100vh;
-                width: 100%;
-                border-radius: 0;
-            }
-
-            .sidebar {
-                width: 100%;
-                height: auto;
-                max-height: 200px;
-            }
-
-            .message-content {
-                max-width: 85%;
-            }
+            .container { flex-direction: column; height: 100vh; width: 100%; border-radius: 0; }
+            .sidebar   { width: 100%; height: auto; max-height: 200px; }
+            .message-content { max-width: 85%; }
         }
     </style>
 </head>
@@ -379,21 +344,11 @@
 
                 <div class="example-queries">
                     <h4> Try These Queries</h4>
-                    <div class="example-query" onclick="sendExampleQuery('What are the interaction types?')">
-                        What are the interaction types?
-                    </div>
-                    <div class="example-query" onclick="sendExampleQuery('How does the analysis work?')">
-                        How does the analysis work?
-                    </div>
-                    <div class="example-query" onclick="sendExampleQuery('Show me the network')">
-                        Show me the network
-                    </div>
-                    <div class="example-query" onclick="sendExampleQuery('Depth plot')">
-                        Depth plot
-                    </div>
-                    <div class="example-query" onclick="sendExampleQuery('help')">
-                        Help
-                    </div>
+                    <div class="example-query" onclick="sendExampleQuery('What are the interaction types?')">What are the interaction types?</div>
+                    <div class="example-query" onclick="sendExampleQuery('How does the analysis work?')">How does the analysis work?</div>
+                    <div class="example-query" onclick="sendExampleQuery('Show me the network')">Show me the network</div>
+                    <div class="example-query" onclick="sendExampleQuery('Depth plot')">Depth plot</div>
+                    <div class="example-query" onclick="sendExampleQuery('help')">Help</div>
                 </div>
             </div>
         </div>
@@ -426,9 +381,10 @@
             </div>
 
             <div class="input-container">
-                <input type="text" class="message-input" id="messageInput" 
+                <textarea type="text" class="message-input" id="messageInput" 
                        placeholder="Ask me about microbiome interactions..." 
-                       onkeypress="handleKeyPress(event)">
+                       onkeypress="handleKeyPress(event)"
+                       oninput="autoResize(this)"></textarea>
                 <button class="send-btn" id="sendBtn" onclick="sendMessage()">Send</button>
             </div>
         </div>
@@ -444,10 +400,18 @@
             status.style.background = color;
         }
 
+        // helper: wrap long DNA strings with <wbr> every 64 chars
+        function wrapLongDNA(text, chunk=64){
+            // works on already-HTML text (won't touch tags)
+            return text.replace(/([ACGTNacgtn]{60,})/g, (m) => {
+                return `<span class="seq-wrap">${m.replace(new RegExp(`(.{${chunk}})`, 'g'), '$1<wbr>')}</span>`;
+            });
+        }
+
         function addMessage(sender, content) {
             const chatContainer = document.getElementById('chatContainer');
             const messageDiv = document.createElement('div');
-            
+
             // Determine if it's a user message or bot message
             let isUser = false;
             let messageContent = '';
@@ -480,12 +444,54 @@
             contentDiv.className = 'message-content';
             
             if (isUser) {
-                contentDiv.textContent = messageContent;
+                // handle very long tokens; also wrap DNA with soft breaks
+                const longTokenCheck   = /[^\s]{60,}/;
+                const longTokenReplace = /[^\s]{60,}/g;
+
+                const escapeHTML = (str) => str
+                  .replace(/&/g, "&amp;")
+                  .replace(/</g, "&lt;")
+                  .replace(/>/g, "&gt;")
+                  .replace(/"/g, "&quot;")
+                  .replace(/'/g, "&#039;");
+
+                const hasLongToken = longTokenCheck.test(messageContent);
+                const isVeryLong   = messageContent.length > 300 || messageContent.split('\n').length > 10;
+
+                if (hasLongToken) {
+                    // build HTML: escape everything except we inject <wbr> inside the long token(s)
+                    let html = '';
+                    let last = 0;
+                    messageContent.replace(longTokenReplace, (match, offset) => {
+                        const before = messageContent.slice(last, offset);
+                        html += escapeHTML(before);
+                        const wrapped = match.replace(/(.{64})/g, '$1<wbr>');
+                        html += `<span class="seq-wrap">${wrapped}</span>`;
+                        last = offset + match.length;
+                        return match;
+                    });
+                    html += escapeHTML(messageContent.slice(last));
+                    contentDiv.innerHTML = html;
+                    contentDiv.classList.add('long-message');
+                } else if (isVeryLong) {
+                    contentDiv.textContent = messageContent;
+                    contentDiv.classList.add('long-message');
+                } else {
+                    contentDiv.textContent = messageContent;
+                }
             } else {
-                // Convert markdown-like formatting to HTML
+                // Bot message: markdown-ish formatting first
                 let formattedContent = messageContent
                     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
                     .replace(/\n/g, '<br>');
+
+                // Make long sequences wrap nicely
+                formattedContent = formattedContent.replace(/`([ACGTNacgtn\s]+)`/g, (m, p1) => {
+                    const wrapped = p1.replace(/(.{64})/g, '$1<wbr>');
+                    return `<code class="seq-wrap">${wrapped}</code>`;
+                });
+                formattedContent = wrapLongDNA(formattedContent, 64);
+
                 contentDiv.innerHTML = formattedContent;
             }
             
@@ -498,7 +504,10 @@
             }
             
             chatContainer.appendChild(messageDiv);
-            chatContainer.scrollTop = chatContainer.scrollHeight;
+            
+            setTimeout(() => {
+                chatContainer.scrollTop = chatContainer.scrollHeight;
+            }, 10);
         }
 
         function showTyping() {
@@ -513,11 +522,11 @@
         async function sendMessage() {
             const input = document.getElementById('messageInput');
             const message = input.value.trim();
-            
             if (!message) return;
             
             addMessage(message);
             input.value = '';
+            input.style.height = '50px'; // Reset textarea height
             
             // Check if this is a "why" question about specific species
             const whyMatch = message.match(/why.*?(\w+).*?(\w+).*?interact/i);
@@ -532,26 +541,17 @@
             try {
                 const response = await fetch('/chat', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ message: message })
                 });
-                
                 const data = await response.json();
                 
                 hideTyping();
                 addMessage('🤖', data.response);
                 
-                if (data.show_network) {
-                    await showNetwork();
-                }
-                if (data.show_depth) {
-                    await showDepth();
-                }
-                
+                if (data.show_network) await showNetwork();
+                if (data.show_depth)   await showDepth();
                 updateStatus('Ready');
-                
             } catch (error) {
                 hideTyping();
                 addMessage('🤖', 'Sorry, I encountered an error. Please try again.');
@@ -566,7 +566,8 @@
         }
 
         function handleKeyPress(event) {
-            if (event.key === 'Enter') {
+            if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
                 sendMessage();
             }
         }
@@ -574,11 +575,7 @@
         async function uploadData() {
             const fileInput = document.getElementById('dataFile');
             const files = fileInput.files;
-            
-            if (files.length === 0) {
-                alert('Please select at least one CSV file');
-                return;
-            }
+            if (files.length === 0) { alert('Please select at least one CSV file'); return; }
             
             isAnalyzing = true;
             updateStatus('Analyzing data...', '#ffc107');
@@ -592,21 +589,15 @@
                 const file = files[i];
                 const name = (file.name || '').toLowerCase();
                 const ext = name.split('.').pop();
-                
-                if (name.includes('depth')) {
-                    depthFiles.push(file);
-                } else if (ext === 'pdf') {
-                    pdfFiles.push(file);
-                } else {
-                    csvFiles.push(file);
-                }
+                if (name.includes('depth')) depthFiles.push(file);
+                else if (ext === 'pdf') pdfFiles.push(file);
+                else csvFiles.push(file);
             }
             
             // Process depth files first
             for (let i = 0; i < depthFiles.length; i++) {
                 const file = depthFiles[i];
                 addMessage('🤖', `📊 Processing depth file: ${file.name}`);
-                
                 try {
                     const fd = new FormData();
                     fd.append('file', file);
@@ -625,42 +616,27 @@
             // Process PDF files
             if (pdfFiles.length > 0) {
                 if (pdfFiles.length === 1) {
-                    // Single PDF processing
                     const file = pdfFiles[0];
                     addMessage('🤖', `📄 Processing PDF: ${file.name}`);
-                    
                     try {
                         const fd = new FormData();
                         fd.append('file', file);
                         const res = await fetch('/upload_file', { method: 'POST', body: fd });
                         const out = await res.json();
-                        
-                        if (out.success) {
-                            addMessage('🤖', out.message);
-                        } else {
-                            addMessage('🤖', `❌ PDF processing failed for ${file.name}: ${out.error}`);
-                        }
+                        if (out.success) addMessage('🤖', out.message);
+                        else addMessage('🤖', `❌ PDF processing failed for ${file.name}: ${out.error}`);
                     } catch (error) {
                         addMessage('🤖', `❌ Error processing PDF ${file.name}: ${error.message}`);
                     }
                 } else {
-                    // Multiple PDF processing
                     addMessage('🤖', `📄 Processing ${pdfFiles.length} PDF files simultaneously...`);
-                    
                     try {
                         const fd = new FormData();
-                        pdfFiles.forEach(file => {
-                            fd.append('files', file);
-                        });
-                        
+                        pdfFiles.forEach(file => fd.append('files', file));
                         const res = await fetch('/upload_multiple_pdfs', { method: 'POST', body: fd });
                         const out = await res.json();
-                        
-                        if (out.success) {
-                            addMessage('🤖', out.message);
-                        } else {
-                            addMessage('🤖', `❌ Multi-PDF processing failed: ${out.error}`);
-                        }
+                        if (out.success) addMessage('🤖', out.message);
+                        else addMessage('🤖', `❌ Multi-PDF processing failed: ${out.error}`);
                     } catch (error) {
                         addMessage('🤖', `❌ Error in multi-PDF processing: ${error.message}`);
                     }
@@ -670,20 +646,14 @@
             // Process CSV files for microbiome analysis
             if (csvFiles.length > 0) {
                 if (csvFiles.length === 1) {
-                    // Single file processing (existing logic)
                     const file = csvFiles[0];
                     addMessage('🤖', `🧬 Analyzing microbiome data: ${file.name}`);
-                    
                     try {
                         const text = await file.text();
                         const lines = text.split('\n');
                         const headers = lines[0].split(',').map(h => h.trim());
-                        
                         const otuData = {};
-                        headers.forEach(header => {
-                            otuData[header] = [];
-                        });
-                        
+                        headers.forEach(header => { otuData[header] = []; });
                         for (let i = 1; i < lines.length; i++) {
                             if (lines[i].trim()) {
                                 const values = lines[i].split(',');
@@ -694,45 +664,26 @@
                                 });
                             }
                         }
-                        
                         const response = await fetch('/analyze', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ 
-                                otu_data: otuData, 
-                                filename: file.name 
-                            })
+                            body: JSON.stringify({ otu_data: otuData, filename: file.name })
                         });
-                        
                         const result = await response.json();
-                        
-                        if (result && result.error) {
-                            addMessage('🤖', `❌ Analysis failed for ${file.name}: ${result.error}`);
-                        } else {
-                            addMessage('🤖', `🎉 Analysis complete! Found ${result.num_interactions || 0} interactions in ${file.name}. You can now ask questions or request visualizations.`);
-                        }
-                        
+                        if (result && result.error) addMessage('🤖', `❌ Analysis failed for ${file.name}: ${result.error}`);
+                        else addMessage('🤖', `🎉 Analysis complete! Found ${result.num_interactions || 0} interactions in ${file.name}. You can now ask questions or request visualizations.`);
                     } catch (error) {
                         addMessage('🤖', `❌ Error processing ${file.name}: ${error.message}`);
                     }
                 } else {
-                    // Multiple file processing (new optimized logic)
                     addMessage('🤖', `🧬 Analyzing ${csvFiles.length} microbiome datasets simultaneously...`);
-                    
                     try {
-                        const filesData = [];
-                        
-                        // Process all CSV files in parallel for faster loading
                         const filePromises = csvFiles.map(async (file) => {
                             const text = await file.text();
                             const lines = text.split('\n');
                             const headers = lines[0].split(',').map(h => h.trim());
-                            
                             const otuData = {};
-                            headers.forEach(header => {
-                                otuData[header] = [];
-                            });
-                            
+                            headers.forEach(header => { otuData[header] = []; });
                             for (let i = 1; i < lines.length; i++) {
                                 if (lines[i].trim()) {
                                     const values = lines[i].split(',');
@@ -743,30 +694,20 @@
                                     });
                                 }
                             }
-                            
                             return { filename: file.name, otu_data: otuData };
                         });
-                        
                         const allFilesData = await Promise.all(filePromises);
-                        
-                        // Send for combined analysis
                         const response = await fetch('/analyze_multiple', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ files: allFilesData })
                         });
-                        
                         const result = await response.json();
-                        
-                        if (result && result.error) {
-                            addMessage('🤖', `❌ Multi-file analysis failed: ${result.error}`);
-                        } else {
+                        if (result && result.error) addMessage('🤖', `❌ Multi-file analysis failed: ${result.error}`);
+                        else {
                             addMessage('🤖', result.message);
-                            if (result.success) {
-                                addMessage('🤖', `📊 Combined dataset ready! Ask for "summary", "network visualization", or specific questions about the interactions.`);
-                            }
+                            if (result.success) addMessage('🤖', `📊 Combined dataset ready! Ask for "summary", "network visualization", or specific questions about the interactions.`);
                         }
-                        
                     } catch (error) {
                         addMessage('🤖', `❌ Error in multi-file analysis: ${error.message}`);
                     }
@@ -781,11 +722,7 @@
             try {
                 const response = await fetch('/network');
                 const data = await response.json();
-                
-                if (data.error) {
-                    addMessage(`Cannot generate network: ${data.error}`);
-                    return;
-                }
+                if (data.error) { addMessage(`Cannot generate network: ${data.error}`); return; }
                 
                 const networkContainer = document.createElement('div');
                 networkContainer.className = 'network-container';
@@ -809,44 +746,33 @@
                 Plotly.newPlot(plotDiv, plotData.data, plotData.layout, {responsive:true});
                 
                 document.getElementById('chatContainer').scrollTop = document.getElementById('chatContainer').scrollHeight;
-                
             } catch (error) {
                 addMessage('Error generating network visualization.');
                 console.error('Network error:', error);
             }
         }
 
-        // NEW: show depth plots inline (same flow as network)
         async function showDepth() {
             try {
                 const res = await fetch('/depth');
                 const data = await res.json();
-                if (!data.success) {
-                    addMessage(`Depth viewer error: ${data.error || 'not available'}`);
-                    return;
-                }
+                if (!data.success) { addMessage(`Depth viewer error: ${data.error || 'not available'}`); return; }
 
                 const card = document.createElement('div');
                 card.className = 'network-container';
                 card.innerHTML = '<h3>Depth Plot Viewer</h3>';
 
-                const distDiv = document.createElement('div');
-                distDiv.style.height = '360px';
-                const cdfDiv  = document.createElement('div');
-                cdfDiv.style.height = '360px';
-                const sampDiv = document.createElement('div');
-                sampDiv.style.height = '360px';
-                const groupDiv = document.createElement('div');
-                groupDiv.style.height = '360px';
+                const distDiv = document.createElement('div'); distDiv.style.height = '360px';
+                const cdfDiv  = document.createElement('div'); cdfDiv.style.height  = '360px';
+                const sampDiv = document.createElement('div'); sampDiv.style.height = '360px';
+                const groupDiv= document.createElement('div'); groupDiv.style.height= '360px';
 
-                // QC summary
                 const s = data.qc_summary;
                 const qc = document.createElement('div');
                 qc.innerHTML = `
                   <p><strong>QC Summary</strong></p>
                   <p>Samples: ${s.n_samples} | Median: ${Math.round(s.median)} | Mean: ${Math.round(s.mean)} | Q1/Q3: ${Math.round(s.q1)}/${Math.round(s.q3)} | Low-depth threshold: ${Math.round(s.low_depth_threshold)} | Flagged: ${s.n_flagged_low_depth}</p>
                 `;
-
                 card.appendChild(qc);
 
                 const plotHdr1 = document.createElement('p'); plotHdr1.innerHTML = '<strong>Distribution</strong>';
@@ -882,33 +808,18 @@
             }
         }
 
-        // Why Logic Explanations Functions
         async function explainWhyInteraction(species1, species2) {
             try {
                 updateStatus('Generating explanation...', '#ffc107');
-                
                 const response = await fetch('/explain_why_interaction', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({ 
-                        species1: species1, 
-                        species2: species2 
-                    })
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ species1: species1, species2: species2 })
                 });
-                
                 const data = await response.json();
-                
-                if (data.error) {
-                    addMessage(`Cannot explain interaction: ${data.error}`);
-                    updateStatus('Error', '#dc3545');
-                    return;
-                }
-                
+                if (data.error) { addMessage(`Cannot explain interaction: ${data.error}`); updateStatus('Error', '#dc3545'); return; }
                 showExplanationModal(data);
                 updateStatus('Ready');
-                
             } catch (error) {
                 addMessage('🤖', 'Error generating explanation. Please try again.');
                 updateStatus('Error', '#dc3545');
@@ -917,7 +828,6 @@
         }
 
         function showExplanationModal(explanation) {
-            // Create explanation container
             const explanationContainer = document.createElement('div');
             explanationContainer.className = 'network-container';
             explanationContainer.innerHTML = `
@@ -929,8 +839,6 @@
                     <p><strong>Confidence Level:</strong> ${explanation.confidence_level}</p>
                 </div>
             `;
-
-            // Logical Reasoning Section
             if (explanation.logical_reasoning) {
                 const logicalDiv = document.createElement('div');
                 logicalDiv.innerHTML = `
@@ -940,29 +848,20 @@
                         <p><strong>Compression Rule:</strong> ${explanation.logical_reasoning.compression_rule}</p>
                     </div>
                 `;
-                
                 if (explanation.logical_reasoning.abductive_reasoning) {
                     logicalDiv.innerHTML += `
                         <p><strong>Abductive Reasoning Steps:</strong></p>
-                        <ul>
-                            ${explanation.logical_reasoning.abductive_reasoning.map(step => `<li>${step}</li>`).join('')}
-                        </ul>
+                        <ul>${explanation.logical_reasoning.abductive_reasoning.map(step => `<li>${step}</li>`).join('')}</ul>
                     `;
                 }
-                
                 if (explanation.logical_reasoning.logical_chain) {
                     logicalDiv.innerHTML += `
                         <p><strong>Logical Chain:</strong></p>
-                        <ol>
-                            ${explanation.logical_reasoning.logical_chain.map(step => `<li>${step}</li>`).join('')}
-                        </ol>
+                        <ol>${explanation.logical_reasoning.logical_chain.map(step => `<li>${step}</li>`).join('')}</ol>
                     `;
                 }
-                
                 explanationContainer.appendChild(logicalDiv);
             }
-
-            // Evidence Analysis Section
             if (explanation.evidence_analysis) {
                 const evidenceDiv = document.createElement('div');
                 evidenceDiv.innerHTML = `
@@ -973,14 +872,10 @@
                         <p><strong>Evidence Types:</strong> ${explanation.evidence_analysis.evidence_types.join(', ')}</p>
                     </div>
                     <p><strong>Supporting Factors:</strong></p>
-                    <ul>
-                        ${explanation.evidence_analysis.supporting_factors.map(factor => `<li>${factor}</li>`).join('')}
-                    </ul>
+                    <ul>${explanation.evidence_analysis.supporting_factors.map(f => `<li>${f}</li>`).join('')}</ul>
                 `;
                 explanationContainer.appendChild(evidenceDiv);
             }
-
-            // Biological Interpretation Section
             if (explanation.biological_interpretation) {
                 const bioDiv = document.createElement('div');
                 bioDiv.innerHTML = `
@@ -993,8 +888,6 @@
                 `;
                 explanationContainer.appendChild(bioDiv);
             }
-
-            // Statistical Support Section
             if (explanation.statistical_support) {
                 const statsDiv = document.createElement('div');
                 statsDiv.innerHTML = `
@@ -1008,31 +901,23 @@
                 `;
                 explanationContainer.appendChild(statsDiv);
             }
-
-            // Alternative Hypotheses Section
             if (explanation.alternative_hypotheses && explanation.alternative_hypotheses.length > 0) {
                 const altDiv = document.createElement('div');
                 altDiv.innerHTML = `
                     <h4> Alternative Hypotheses Considered</h4>
                     <div style="background: #e2e3e5; padding: 12px; border-radius: 6px;">
                 `;
-                
                 explanation.alternative_hypotheses.forEach(alt => {
-                    altDiv.innerHTML += `
-                        <p><strong>${alt.hypothesis}:</strong> ${alt.reason_rejected}</p>
-                    `;
+                    altDiv.innerHTML += `<p><strong>${alt.hypothesis}:</strong> ${alt.reason_rejected}</p>`;
                 });
-                
                 altDiv.innerHTML += `</div>`;
                 explanationContainer.appendChild(altDiv);
             }
 
-            // Add to chat
             document.getElementById('chatContainer').appendChild(explanationContainer);
             document.getElementById('chatContainer').scrollTop = document.getElementById('chatContainer').scrollHeight;
         }
 
-        // Add example queries for why logic
         function addWhyLogicExamples() {
             const exampleContainer = document.querySelector('.example-queries');
             if (exampleContainer) {
@@ -1041,7 +926,6 @@
                     'Explain the reasoning behind this interaction',
                     'What evidence supports this relationship?'
                 ];
-                
                 whyExamples.forEach(example => {
                     const exampleDiv = document.createElement('div');
                     exampleDiv.className = 'example-query';
@@ -1054,45 +938,25 @@
 
         async function uploadFiles(fileType) {
             let fileInput, endpoint;
-            
-            if (fileType === 'pdf') {
-                fileInput = document.getElementById('pdf-upload');
-                endpoint = '/upload_file';
-            } else {
-                return;
-            }
+            if (fileType === 'pdf') { fileInput = document.getElementById('pdf-upload'); endpoint = '/upload_file'; }
+            else { return; }
             
             const files = fileInput.files;
-            if (files.length === 0) {
-                alert(`Please select at least one ${fileType.toUpperCase()} file`);
-                return;
-            }
+            if (files.length === 0) { alert(`Please select at least one ${fileType.toUpperCase()} file`); return; }
             
             for (let file of files) {
                 const formData = new FormData();
                 formData.append('file', file);
-                
                 try {
                     addMessage('', ` Uploading ${file.name}...`);
-                    
-                    const response = await fetch(endpoint, {
-                        method: 'POST',
-                        body: formData
-                    });
-                    
+                    const response = await fetch(endpoint, { method: 'POST', body: formData });
                     const result = await response.json();
-                    
-                    if (result.success) {
-                        addMessage('', ` ${file.name} uploaded successfully!`);
-                        updateFilesList();
-                    } else {
-                        addMessage('', ` Upload failed for ${file.name}: ${result.error}`);
-                    }
+                    if (result.success) { addMessage('', ` ${file.name} uploaded successfully!`); updateFilesList(); }
+                    else { addMessage('', ` Upload failed for ${file.name}: ${result.error}`); }
                 } catch (error) {
                     addMessage('', ` Error uploading ${file.name}: ${error.message}`);
                 }
             }
-            
             fileInput.value = '';
         }
 
@@ -1100,11 +964,9 @@
             try {
                 const response = await fetch('/get_uploaded_files');
                 const result = await response.json();
-                
                 const filesDisplay = document.getElementById('files-display');
                 if (result.success && result.files) {
                     let html = '';
-                    
                     if (result.files.csv_files && Object.keys(result.files.csv_files).length > 0) {
                         html += '<h5>CSV Files:</h5><ul>';
                         for (const [filename, info] of Object.entries(result.files.csv_files)) {
@@ -1112,7 +974,6 @@
                         }
                         html += '</ul>';
                     }
-                    
                     if (result.files.pdf_files && Object.keys(result.files.pdf_files).length > 0) {
                         html += '<h5>PDF Files:</h5><ul>';
                         for (const [filename, info] of Object.entries(result.files.pdf_files)) {
@@ -1120,11 +981,7 @@
                         }
                         html += '</ul>';
                     }
-                    
-                    if (html === '') {
-                        html = '<p>No files uploaded yet.</p>';
-                    }
-                    
+                    if (html === '') html = '<p>No files uploaded yet.</p>';
                     filesDisplay.innerHTML = html;
                 }
             } catch (error) {
@@ -1132,7 +989,6 @@
             }
         }
 
-        // Initialize
         document.addEventListener('DOMContentLoaded', function() {
             document.getElementById('messageInput').focus();
             addWhyLogicExamples();
@@ -1142,19 +998,28 @@
             try {
                 const response = await fetch('/refresh_chat_history');
                 const data = await response.json();
-                
                 if (data.success) {
                     const chatContainer = document.getElementById('chatContainer');
                     chatContainer.innerHTML = '';
-                    
-                    data.chat_history.forEach(message => {
-                        addMessage(message.sender, message.content);
-                    });
-                    
+                    data.chat_history.forEach(message => { addMessage(message.sender, message.content); });
                     chatContainer.scrollTop = chatContainer.scrollHeight;
                 }
             } catch (error) {
                 console.error('Error refreshing chat history:', error);
+            }
+        }
+
+        function autoResize(textArea) {
+            textArea.style.height = '50px';
+            const newHeight = Math.min(textArea.scrollHeight, 150);
+            textArea.style.height = newHeight + 'px';
+            const cursorPosition = textArea.selectionStart;
+            const textBeforeCursor = textArea.value.substring(0, cursorPosition);
+            const lines = textBeforeCursor.split('\n');
+            const currentLine = lines.length;
+            const lineHeight = parseInt(window.getComputedStyle(textArea).lineHeight);
+            if (currentLine * lineHeight > textArea.scrollTop + textArea.clientHeight) {
+                textArea.scrollTop = (currentLine * lineHeight) - textArea.clientHeight + lineHeight;
             }
         }
     </script>
