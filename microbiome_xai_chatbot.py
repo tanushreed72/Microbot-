@@ -207,51 +207,62 @@ class MicrobiomeXAIChatbot:
         return summary
 
     def generate_depth_figures(self) -> Dict[str, Any]:
-        # Check if depth file is uploaded first
-        depth_files = [f for f in self.uploaded_files['csv_files'].keys() if 'depth' in f.lower()]
-        
+        # 1) Prefer freshly uploaded depth.csv held in memory
+        depth_files = [
+            f for f in self.uploaded_files.get('csv_files', {}).keys()
+            if 'depth' in f.lower()
+        ]
         if depth_files:
-            # Use uploaded depth file
             depth_filename = depth_files[0]
             df = self.uploaded_files['csv_files'][depth_filename]['data'].copy()
             
-            # Try to identify depth and sample columns
             depth_col = None
             sample_col = None
-            
+
             for col in df.columns:
-                col_lower = col.lower()
-                if any(term in col_lower for term in ['depth', 'reads', 'count', 'size']):
-                    if pd.api.types.is_numeric_dtype(df[col]):
-                        depth_col = col
-                        break
-            
+                if pd.api.types.is_numeric_dtype(df[col]) and any(
+                    kw in col.lower() for kw in ['depth', 'reads', 'count', 'size']
+                ):
+                    depth_col = col
+                    break
+
             for col in df.columns:
-                col_lower = col.lower()
-                if any(term in col_lower for term in ['sample', 'id', 'name']):
+                if any(kw in col.lower() for kw in ['sample', 'id', 'name']):
                     sample_col = col
                     break
-            
-            # If we found appropriate columns, standardize them
-            if depth_col and sample_col:
-                df = df.rename(columns={depth_col: 'Depth', sample_col: 'Sample'})
-            elif depth_col:
-                df = df.rename(columns={depth_col: 'Depth'})
-                df['Sample'] = df.index.astype(str)
-            else:
-                # Fallback: assume first numeric column is depth
+
+            if depth_col is None:
+                # Fallback: first numeric column
                 numeric_cols = df.select_dtypes(include=[np.number]).columns
                 if len(numeric_cols) > 0:
-                    df = df.rename(columns={numeric_cols[0]: 'Depth'})
-                    df['Sample'] = df.index.astype(str)
+                    depth_col = numeric_cols[0]
                 else:
                     raise ValueError("No numeric depth column found in uploaded depth file")
-                    
-        elif self.depth_df is None:
+
+            # Standardize column names
+            df = df.rename(columns={depth_col: 'Depth'})
+            if sample_col:
+                df = df.rename(columns={sample_col: 'Sample'})
+            else:
+                if df.index.name is not None:
+                    df['Sample'] = df.index.astype(str)
+                else:
+                    df['Sample'] = [f"S{i+1}" for i in range(len(df))]
+
+        # 2) Else, if we already have a loaded DataFrame in memory, use it
+        elif hasattr(self, 'depth_df') and isinstance(getattr(self, 'depth_df', None), pd.DataFrame) and not self.depth_df.empty:
+            df = self.depth_df.copy()
+
+        # 3) Else, try the default depth file on disk
+        elif os.path.exists(DEPTH_CSV_DEFAULT):
             self.load_depth_csv(DEPTH_CSV_DEFAULT)
             df = self.depth_df.copy()
+
+        # 4) Nothing available
         else:
-            df = self.depth_df.copy()
+            raise FileNotFoundError(
+                "No depth data available. Please upload a depth.csv file or analyze microbiome data with depth information first.")
+
         qc = self._depth_qc_summary(df)
 
         hist = px.histogram(
@@ -908,7 +919,7 @@ InfIntE ensures statistical rigor through:
 4. **Cross-Validation**: Tests model stability across different data subsets
 
 **Interpretation:**
-- Higher compression values = stronger, more reliable interactions
+- Higher compression values indicate stronger statistical support
 - StARS ensures model stability across different data subsets
 - Permutation testing validates statistical significance
             """
@@ -933,18 +944,15 @@ Microbiome interaction networks reveal important ecological patterns:
             return self.explain_analysis_process()
         
         # Handle depth plot requests FIRST (before network to avoid conflict with 'plot' keyword)
+        # Handle depth plot requests FIRST (before network to avoid conflict)
         depth_terms = [
             "depth plot", "show depth", "sequencing depth", "depth distribution",
-            "library size", "depth visualization", "depth stats", "depth qc"
+            "library size", "depth visualization", "depth stats", "depth qc", "show depth plot"
         ]
         if any(term in query_lower for term in depth_terms):
-            # Check if depth files are available
-            depth_files = [f for f in self.uploaded_files['csv_files'].keys() if 'depth' in f.lower()]
-            if depth_files or self.current_analysis:
-                return "SHOW_DEPTH"
-            else:
-                return "No depth data available. Please upload a depth.csv file or analyze microbiome data with depth information first."
-        
+            return "SHOW_DEPTH"
+
+
         # Handle network visualization requests (more specific terms to avoid conflict)
         elif any(term in query_lower for term in ['network', 'show me the network', 'interactions network']) or \
              (any(term in query_lower for term in ['plot', 'graph', 'visualization']) and any(term in query_lower for term in ['interaction', 'network'])):
@@ -957,21 +965,8 @@ Microbiome interaction networks reveal important ecological patterns:
         if csv_response:
             return csv_response
         
-        # ---- CSV Data Queries ----
-        # Handle questions about uploaded CSV data
-        if self.uploaded_files['csv_files']:
-            csv_response = self.handle_intelligent_csv_query(query_lower)
-            if csv_response:
-                return csv_response
-  
-        
-        # Debug: Check if current_analysis exists
-        print(f"DEBUG: Query = '{query_lower}'")
-        print(f"DEBUG: current_analysis exists = {self.current_analysis is not None}")
-        if self.current_analysis:
-            print(f"DEBUG: interactions shape = {self.current_analysis['interactions'].shape}")
-        
-        # Dataset filtering commands
+        # ---- Current Analysis Queries (High Priority) ----
+        # Dataset filtering commands - these should work BEFORE PDF search
         if any(word in query_lower for word in ['filter', 'show me', 'find', 'top', 'interactions with']) and self.current_analysis:
             try:
                 if 'abundance' in query_lower or any(pattern in query_lower for pattern in ['> 0.1', '> 0.5', '>0.1', '>0.5']):
@@ -1050,8 +1045,18 @@ Microbiome interaction networks reveal important ecological patterns:
             except Exception as e:
                 return f"Error processing filter request: {str(e)}. Please try uploading and analyzing data first."
         
-        elif any(word in query_lower for word in ['filter', 'show me', 'find']) and not self.current_analysis:
-            return "No analysis data available. Please upload and analyze data first."
+        # ---- PDF Search Queries ----
+        # Check for PDF search queries ONLY with explicit PDF references
+        explicit_pdf_terms = ["pdf","according to the paper", "paper", "from the pdf", "paper says", "document states", "literature shows", "study mentions", "research paper", "in pdf"]
+        if any(term in query_lower for term in explicit_pdf_terms) and self.uploaded_files['pdf_files']:
+            return self.search_across_all_pdfs(query)
+        
+        # ---- CSV Data Queries ----
+        # Handle questions about uploaded CSV data
+        if self.uploaded_files['csv_files']:
+            csv_response = self.handle_intelligent_csv_query(query_lower)
+            if csv_response:
+                return csv_response
         
         # Analysis commands
         if any(word in query_lower for word in ['analyze', 'analysis', 'run analysis']):
@@ -1136,8 +1141,28 @@ Microbiome interaction networks reveal important ecological patterns:
             # Generate automatic analysis summary
             analysis_summary = self.generate_auto_analysis_summary(df, filename, csv_type, False)
             
+            # Handle depth CSV files specifically
+            if csv_type == 'depth':
+                # Also save to the default depth location for compatibility
+                os.makedirs(os.path.dirname(DEPTH_CSV_DEFAULT), exist_ok=True)
+                df.to_csv(DEPTH_CSV_DEFAULT, index=False)
+                
+                # Load into depth_df for immediate access
+                try:
+                    self.load_depth_csv(DEPTH_CSV_DEFAULT)
+                except Exception as e:
+                    print(f"Warning: Could not load depth file into depth_df: {e}")
+                
+                return {
+                    'success': True,
+                    'message': f'✅ Depth file {filename} uploaded successfully! Ask for a depth plot to visualize sequencing depth.',
+                    'file_stored': True,
+                    'auto_analysis': analysis_summary,
+                    'csv_type': csv_type
+                }
+            
             # Handle interaction CSV files directly without R analysis
-            if csv_type == 'interactions':
+            elif csv_type == 'interactions':
                 # Store interaction data directly for network visualization
                 interactions = df.copy()
                 
@@ -1365,7 +1390,7 @@ Microbiome interaction networks reveal important ecological patterns:
             # Species/Taxa queries - works for all CSV types
             if any(term in query_lower for term in ['list species', 'show species', 'what species', 'species list']):
                 return self.handle_species_query(df, filename, csv_type)
-            
+
             # Unique names queries - for species mapping files
             elif any(term in query_lower for term in ['unique names', 'unique name', 'with its unique names', 'with unique names']):
                 return self.handle_species_query(df, filename, csv_type, query_type='unique_names')
@@ -1951,6 +1976,55 @@ Microbiome interaction networks reveal important ecological patterns:
         
         return summary.strip()
 
+    def process_pdf_file(self, filename: str, file_path: str) -> Dict[str, Any]:
+        """Process a single PDF file and extract its content for search"""
+        try:
+            # Extract text from PDF
+            text = ""
+            try:
+                # Try PyMuPDF first
+                doc = fitz.open(file_path)
+                for page in doc:
+                    text += page.get_text()
+                doc.close()
+            
+                if not text.strip():
+                    # Fallback to PyPDF2
+                    with open(file_path, 'rb') as pdf_file:
+                        pdf_reader = PyPDF2.PdfReader(pdf_file)
+                        for page in pdf_reader.pages:
+                            text += page.extract_text()
+        
+            except Exception as e:
+                return {'success': False, 'error': f'Failed to extract text from PDF: {str(e)}'}
+        
+            if not text.strip():
+                return {'success': False, 'error': 'No text could be extracted from the PDF'}
+        
+        # Store PDF info
+            self.uploaded_files['pdf_files'][filename] = {
+                'path': file_path,
+                'content': text,
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+        
+        # Generate success message
+            word_count = len(text.split())
+            message = f"📄 PDF processing complete! Successfully processed '{filename}'. "
+            message += f"Extracted {len(text):,} characters ({word_count:,} words). "
+            message += "You can now search this PDF using queries like 'search for microbial interactions'."
+        
+            return {
+                'success': True,
+                'message': message,
+                'text_length': len(text),
+                'word_count': word_count,
+                'filename': filename
+            }
+        
+        except Exception as e:
+            return {'success': False, 'error': f'Error processing PDF file: {str(e)}'}
+
     def process_multiple_pdf_files(self, pdf_files_info: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Process multiple PDF files and combine their content for search"""
         if not pdf_files_info:
@@ -2070,13 +2144,27 @@ Microbiome interaction networks reveal important ecological patterns:
     def handle_otu_id_lookup(self, query_lower: str) -> str:
         """Handle OTU ID to species name lookup queries and species to OTU ID queries"""
         import re
+
+        # Check for species name to OTU ID queries FIRST (before numeric ID patterns)
+        species_patterns = [
+            r'otu.{0,5}id.{0,5}for.{0,5}(?:the.{0,5})?(?:species.{0,5}name.{0,5})?([A-Za-z][A-Za-z0-9_\-]+)(?:\?|$)',
+            r'what.{0,5}is.{0,5}the.{0,5}otu.{0,5}id.{0,5}for.{0,5}(?:the.{0,5})?(?:species.{0,5}name.{0,5})?([A-Za-z][A-Za-z0-9_\-]+)(?:\?|$)',
+            r'find.{0,5}otu.{0,5}id.{0,5}(?:for.{0,5})?([A-Za-z][A-Za-z0-9_\-]+)(?:\?|$)'
+        ]
+        
+        for pattern in species_patterns:
+            match = re.search(pattern, query_lower)
+            if match:
+                species_name = match.group(1).strip()
+                return self.lookup_species_to_otu(species_name)
+        
         
         # Check for numeric ID queries first
         numeric_id_patterns = [
-            r'(?:numeric.{0,5}id|id).{0,10}(?:of.{0,5}|for.{0,5})?(?:the.{0,5})?(?:species.{0,5})?([A-Za-z][A-Za-z0-9_\-]+)(?:\?|$)',
-            r'what.{0,5}is.{0,5}the.{0,5}(?:numeric.{0,5})?id.{0,5}(?:of.{0,5}|for.{0,5})?(?:the.{0,5})?(?:species.{0,5})?([A-Za-z][A-Za-z0-9_\-]+)(?:\?|$)',
-            r'show.{0,5}(?:numeric.{0,5})?id.{0,5}(?:of.{0,5}|for.{0,5})?(?:the.{0,5})?(?:species.{0,5})?([A-Za-z][A-Za-z0-9_\-]+)(?:\?|$)',
-            r'find.{0,5}(?:numeric.{0,5})?id.{0,5}(?:of.{0,5}|for.{0,5})?(?:the.{0,5})?(?:species.{0,5})?([A-Za-z][A-Za-z0-9_\-]+)(?:\?|$)'
+            r'(?:numeric.{0,5}id|id).{0,10}(?:of.{0,5}|for.{0,5})?(?:the.{0,5})?(?:species.{0,5}name.{0,5})?([A-Za-z][A-Za-z0-9_\-]+)(?:\?|$)',
+            r'what.{0,5}is.{0,5}the.{0,5}(?:numeric.{0,5})?id.{0,5}(?:of.{0,5}|for.{0,5})?(?:the.{0,5})?(?:species.{0,5}name.{0,5})?([A-Za-z][A-Za-z0-9_\-]+)(?:\?|$)',
+            r'show.{0,5}(?:numeric.{0,5})?id.{0,5}(?:of.{0,5}|for.{0,5})?(?:the.{0,5})?(?:species.{0,5}name.{0,5})?([A-Za-z][A-Za-z0-9_\-]+)(?:\?|$)',
+            r'find.{0,5}(?:numeric.{0,5})?id.{0,5}(?:of.{0,5}|for.{0,5})?(?:the.{0,5})?(?:species.{0,5}name.{0,5})?([A-Za-z][A-Za-z0-9_\-]+)(?:\?|$)'
         ]
         
         for pattern in numeric_id_patterns:
@@ -2105,7 +2193,7 @@ Microbiome interaction networks reveal important ecological patterns:
             r'(?:what\s+is\s+the\s+)?family\s+name\s+of\s+genus\s+([A-Za-z][A-Za-z0-9_\-]+)',
             r'(?:what\s+is\s+the\s+)?genus\s+of\s+(?:the\s+)?family\s+(?:name\s+)?([A-Za-z][A-Za-z0-9_\-]+)',
             r'(?:what\s+is\s+the\s+)?phylum\s+of\s+(?:genus\s+|order\s+)?([A-Za-z][A-Za-z0-9_\-]+)',
-            r'(?:what\s+is\s+the\s+)?class\s+of\s+(?:genus\s+)?([A-Za-z][A-Za-z0-9_\-]+)',
+            r'(?:what\s+is\s+the\s+)?class\s+of\s+(?:genus\s+|order\s+)?([A-Za-z][A-Za-z0-9_\-]+)',
             r'(?:what\s+is\s+the\s+)?order\s+of\s+(?:genus\s+|phylum\s+)?([A-Za-z][A-Za-z0-9_\-]+)',
             r'(?:what\s+is\s+the\s+)?kingdom\s+of\s+(?:genus\s+|species\s+)?([A-Za-z][A-Za-z0-9_\-]+)',
             r'(?:what\s+is\s+the\s+)?species\s+of\s+(?:genus\s+)?([A-Za-z][A-Za-z0-9_\-]+)',
@@ -2204,6 +2292,7 @@ Microbiome interaction networks reveal important ecological patterns:
                 if len(matching_rows) > 0:
                     unique_name = matching_rows.iloc[0]['unique_name']
                     actual_species = matching_rows.iloc[0]['species_name']
+                    
                     return f"**Unique Name Lookup Result:**\n\n" + \
                            f"🔬 **Species Name:** **{actual_species}**\n" + \
                            f"🏷️ **Unique Name:** **{unique_name}**\n\n" + \
@@ -2246,10 +2335,18 @@ Microbiome interaction networks reveal important ecological patterns:
                 if len(matching_rows) > 0:
                     otu_id = matching_rows.iloc[0]['otu_id']
                     actual_species = matching_rows.iloc[0]['species_name']
+                    
+                    # Include additional info if available
+                    additional_info = ""
+                    if 'unique_name' in df.columns:
+                        unique_name = matching_rows.iloc[0]['unique_name']
+                        additional_info += f"🏷️ **Unique Name:** {unique_name}\n"
+                    
                     return f"**OTU ID Lookup Result:**\n\n" + \
-                           f"🔬 **Species Name:** **{actual_species}**\n" + \
-                           f"🧬 **OTU ID:** `{otu_id}`\n\n" + \
-                           f"*Found in {filename}*"
+                           f"🔬 **Species Name:** **{species_name}**\n" + \
+                           f"🧬 **OTU ID:** `{otu_id}`\n" + \
+                           additional_info + \
+                           f"\n*Found in {filename}*"
                 
                 # Try partial match
                 partial_matches = df[df['species_name'].str.lower().str.contains(species_name, na=False)]
@@ -2301,7 +2398,7 @@ Microbiome interaction networks reveal important ecological patterns:
                         additional_info += f"🏷️ **Unique Name:** {unique_name}\n"
                     
                     return f"**Numeric ID Lookup Result:**\n\n" + \
-                           f"🔬 **Species Name:** **{actual_species}**\n" + \
+                           f"🔬 **Species Name:** **{species_name}**\n" + \
                            f"🔢 **Numeric ID:** **{numeric_id}**\n" + \
                            additional_info + \
                            f"\n*Found in {filename}*"
@@ -3102,21 +3199,6 @@ def chat():
         'timestamp': datetime.now().isoformat()
     })
 
-@app.route('/upload_depth', methods=['POST'])
-def upload_depth():
-    try:
-        if 'file' not in request.files:
-            return jsonify({'success': False, 'error': "No file part named 'file'"}), 400
-        f = request.files['file']
-        if not f.filename:
-            return jsonify({'success': False, 'error': "No file selected"}), 400
-        os.makedirs(os.path.dirname(DEPTH_CSV_DEFAULT), exist_ok=True)
-        f.save(DEPTH_CSV_DEFAULT)
-        chatbot.load_depth_csv(DEPTH_CSV_DEFAULT)
-        return jsonify({'success': True, 'schema': chatbot.depth_schema})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 400
-
 @app.route('/depth', methods=['GET'])
 def depth_viewer():
     try:
@@ -3126,7 +3208,6 @@ def depth_viewer():
         return jsonify({"success": False, "error": str(e)}), 404
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 400
-
 
 @app.route('/analyze', methods=['POST'])
 def analyze():
@@ -3183,16 +3264,46 @@ def interaction_summary():
     result = chatbot.get_interaction_summary()
     return jsonify(result)
 
-@app.route('/upload_file', methods=['POST'])
-def upload_file():
+@app.route('/upload_depth', methods=['POST'])
+def upload_depth():
     try:
         if 'file' not in request.files:
             return jsonify({'success': False, 'error': "No file part named 'file'"}), 400
         f = request.files['file']
-        if f.filename == '':
+        if not f.filename:
             return jsonify({'success': False, 'error': "No file selected"}), 400
+
+        os.makedirs(os.path.dirname(DEPTH_CSV_DEFAULT), exist_ok=True)
+        f.save(DEPTH_CSV_DEFAULT)
+
+        chatbot.load_depth_csv(DEPTH_CSV_DEFAULT)
+
+        if not hasattr(chatbot, 'uploaded_files'):
+            chatbot.uploaded_files = {'csv_files': {}, 'pdf_files': {}}
+
+        # ✅ register the uploaded file in-memory so depth queries work immediately
+        chatbot.uploaded_files['csv_files']['depth.csv'] = {
+            'path': DEPTH_CSV_DEFAULT,
+            'data': chatbot.depth_df.copy(),
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+
+        return jsonify({'success': True, 'schema': chatbot.depth_schema})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+
+@app.route('/upload_file', methods=['POST'])
+def upload_file():
+    """Handle single file upload (PDF or CSV)"""
+    try:
+        if 'file' not in request.files:
+            return jsonify({'success': False, 'error': 'No file provided'}), 400
         
-        filename = secure_filename(f.filename)
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'success': False, 'error': 'No file selected'}), 400
+        
+        filename = secure_filename(file.filename)
         file_ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
         
         if file_ext not in chatbot.allowed_extensions:
@@ -3200,57 +3311,27 @@ def upload_file():
         
         # Save file
         file_path = os.path.join(chatbot.upload_dir, filename)
-        f.save(file_path)
+        file.save(file_path)
         
-        # Process based on file type
         if file_ext == 'pdf':
-            try:
-                # Try PyMuPDF first
-                doc = fitz.open(file_path)
-                text = ""
-                for page in doc:
-                    text += page.get_text()
-                doc.close()
-                
-                if not text.strip():
-                    # Fallback to PyPDF2
-                    with open(file_path, 'rb') as pdf_file:
-                        pdf_reader = PyPDF2.PdfReader(pdf_file)
-                        text = ""
-                        for page in pdf_reader.pages:
-                            text += page.extract_text()
-                
-                # Store PDF info
-                chatbot.uploaded_files['pdf_files'][filename] = {
-                    'path': file_path,
-                    'content': text,
-                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                }
-                
-                return jsonify({
-                    'success': True,
-                    'message': f'📄 PDF {filename} uploaded and processed successfully',
-                    'text_length': len(text)
-                })
-                
-            except Exception as e:
-                return jsonify({'success': False, 'error': f'PDF processing failed: {str(e)}'}), 400
+            # Process PDF file
+            result = chatbot.process_pdf_file(filename, file_path)
+        elif file_ext in ['csv', 'tsv', 'txt']:
+            # Process CSV file
+            result = chatbot.analyze_csv_file(filename, file_path)
+        else:
+            return jsonify({'success': False, 'error': 'Unsupported file type'}), 400
         
-        elif file_ext == 'csv':
-            try:
-                df = pd.read_csv(file_path)
-                result = chatbot.analyze_csv_file(file_path)
-                
-                # Check if this is an interaction CSV that should trigger network visualization
-                if result.get('show_network', False):
-                    result['show_network'] = True
-                    result['message'] += '\n\n🌐 **Network visualization available!** Ask for "network plot" or "show network" to view interactions.'
-                
-                return jsonify(result)
-                
-            except Exception as e:
-                return jsonify({'success': False, 'error': f'CSV processing failed: {str(e)}'}), 400
-                
+        # Add to chat history if successful
+        if result.get('success'):
+            chatbot.chat_history.append({
+                'user': f'Uploaded {filename}',
+                'bot': result['message'],
+                'timestamp': datetime.now().isoformat()
+            })
+        
+        return jsonify(result)
+        
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 

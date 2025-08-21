@@ -8,7 +8,7 @@
             # Handle Python3 dependency gracefully
             tryCatch({
                 # Try to run analysis with error handling
-                result <- infinte(otu_tb=otu_data, exclusion=TRUE, ncores=1, nperms=10)
+                result <- infinte(otu_tb=otu_data, exclusion=TRUE, ncores=1, nperms=5)
             }, error = function(e) {
                 # If Python3 error, try with minimal settings
                 cat("Warning: Python3 dependency issue detected, using fallback mode\n")
@@ -24,8 +24,8 @@
                 Target = interactions$sp2,
                 Interaction_Type = interactions$lnk,
                 Confidence = interactions$comp,
-                Dataset_Size = "17x15",
-                Optimization_Applied = "No",
+                Dataset_Size = "112x4",
+                Optimization_Applied = "Yes",
                 Analysis_Date = Sys.Date()
             )
             write.csv(interactions_enhanced, "C:/MicrobiomeBot/Microbot-/interactions_enhanced.csv", row.names=FALSE)
