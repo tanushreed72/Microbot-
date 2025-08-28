@@ -24,7 +24,7 @@
                 Target = interactions$sp2,
                 Interaction_Type = interactions$lnk,
                 Confidence = interactions$comp,
-                Dataset_Size = "112x4",
+                Dataset_Size = "112x5",
                 Optimization_Applied = "Yes",
                 Analysis_Date = Sys.Date()
             )

@@ -1,10 +1,271 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MicrobiomeBot - XAI Chatbot</title>
-    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>MicrobiomeBot - XAI Chatbot</title>
+      
+        <!-- Load Plotly (no inline JS here) -->
+        <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+        
+        <script>
+            function formatCellValue(value) {
+              if (value === undefined || value === null) return { text: "", className: "" };
+            
+              const s = String(value);
+              const isSequence = /^[ACGTNacgtn]+$/i.test(s); // DNA-ish strings
+              const limit = isSequence ? 12 : 32;            // first N chars to keep
+            
+              if (s.length > limit) {
+                return {
+                  text: s.slice(0, limit) + "…",   // e.g., CGGGACTTAA... 
+                  title: s,                         // full value on hover
+                  className: isSequence ? "truncate-cell seq" : "truncate-cell"
+                };
+              }
+              return {
+                text: s,
+                title: s,
+                className: isSequence ? "truncate-cell seq" : "truncate-cell"
+              };
+            }
+        </script>
+            
+        <!-- Your app JS goes in a separate tag -->
+        <script>
+        async function previewSelectedCSVs() {
+          const boxes = Array.from(document.querySelectorAll('.csv-checkbox:checked'));
+          if (boxes.length === 0) {
+            addMessage('🤖', '⚠️ No CSVs selected. Check one or more CSVs, then click **Preview Selected**.');
+            return;
+          }
+          const filenames = boxes.map(b => b.value);
+          try {
+            const res = await fetch('/preview_csvs', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ filenames })
+            });
+            const out = await res.json();
+            if (!out.success) { addMessage('🤖', `❌ Preview failed: ${out.error || 'unknown error'}`); return; }
+            out.previews.forEach(prev => {
+              if (prev.error) { addMessage('🤖', `⚠️ ${prev.filename}: ${prev.error}`); return; }
+              const container = document.createElement('div');
+              container.className = 'network-container';
+              const isOTU = prev.filename === "otu_table.csv";
+              container.innerHTML = `<h3>Preview: ${prev.filename} <small style="color:#6c757d">(${prev.csv_type || 'generic'})</small></h3>`;
+              const table = document.createElement('table');
+              const thead = document.createElement('thead');
+              const trh = document.createElement('tr');
+              (prev.columns || []).forEach(col => {
+                const th = document.createElement('th');
+                th.textContent = col;
+                th.style.border = '1px solid #e9ecef';
+                th.style.padding = '6px';
+                th.style.background = '#f1f3f5';
+                th.style.textAlign = 'left';
+                if (isOTU) {
+                  th.style.maxWidth = "60px";   // adjust as needed
+                  th.style.overflow = "hidden";
+                  th.style.textOverflow = "ellipsis";
+                  th.style.whiteSpace = "nowrap";
+                  th.title = col; // show full name on hover
+                }
+                trh.appendChild(th);
+              });
+              thead.appendChild(trh);
+              table.appendChild(thead);
+              const tbody = document.createElement('tbody');
+              (prev.rows || []).forEach(row => {
+                const tr = document.createElement('tr');
+                (prev.columns || []).forEach(col => {
+                  const td = document.createElement('td');
+                  const v = row[col];
+                  const { text, title, className } = formatCellValue(v);
+                  td.textContent = text;            // truncated in-cell value
+                  if (title) {
+                    td.title = title;
+                    td.dataset.fullvalue = title;      // full value on hover tooltip
+                  }
+                  td.className = (td.className ? td.className + " " : "") + (className || "truncate-cell");
+                  td.style.border = '1px solid #e9ecef';
+                  td.style.padding = '6px';
+                  if (isOTU) {
+                    td.style.maxWidth = "60px";   // numbers don't need much space
+                    td.style.overflow = "hidden";
+                    td.style.textOverflow = "ellipsis";
+                    td.style.whiteSpace = "nowrap";
+                  }
+                  tr.appendChild(td);
+                });
+                tbody.appendChild(tr);
+              });
+              table.appendChild(tbody);
+              container.appendChild(table);
+              document.getElementById('chatContainer').appendChild(container);
+            });
+            document.getElementById('chatContainer').scrollTop = document.getElementById('chatContainer').scrollHeight;
+          } catch (e) {
+            addMessage('🤖', `❌ Preview error: ${e.message}`);
+          }
+        }
+
+                // Consolidated DOMContentLoaded listener - replaces all separate listeners
+                document.addEventListener('DOMContentLoaded', () => {
+            // 1. Preview button setup (from line 114-117)
+            const previewBtn = document.getElementById('previewBtn');
+            if (previewBtn) previewBtn.addEventListener('click', previewSelectedCSVs);
+            
+            // 2. Explain panel toggle setup (from line 1339-1370)
+            const header = document.getElementById('edgeExplainToggle');
+            const content = document.getElementById('edgeExplainContent');
+
+            if (header && content) {
+                function toggle(open){
+                    const isOpen = (open !== undefined) ? open : content.hasAttribute('hidden');
+                    if (isOpen){
+                        content.removeAttribute('hidden');
+                        header.setAttribute('aria-expanded', 'true');
+                    } else {
+                        content.setAttribute('hidden', '');
+                        header.setAttribute('aria-expanded', 'false');
+                    }
+                }
+
+                header.addEventListener('click', () => toggle());
+                header.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+                    if (e.key === 'ArrowRight') toggle(true);
+                    if (e.key === 'ArrowLeft')  toggle(false);
+                });
+
+                // start collapsed
+                toggle(false);
+                // Open panel when inputs get focus
+                ['exSpecies1','exSpecies2','exLabel'].forEach(id=>{
+                    const el = document.getElementById(id);
+                    if (el) el.addEventListener('focus', openExplainPanel);
+                });
+            }
+            
+            // 3. Update files list (from line 1427-1429)
+            updateFilesList();
+        });
+      
+      
+        // Show chosen CSV filenames
+        function updateFileDisplay() {
+          const input = document.getElementById('dataFile');
+          const out = document.getElementById('csv-file-display');
+          const files = Array.from(input.files || []);
+          out.innerHTML = files.length ? files.map(f => `• ${f.name}`).join('<br>') : '';
+        }
+
+        async function compareSelectedCSVs() {
+  // Collect exactly two checked file names
+  const checked = Array.from(document.querySelectorAll('.csv-checkbox:checked')).map(x => x.value);
+  if (checked.length === 0) {
+    addMessage('🤖', '⚠️ No CSVs selected. Please check two CSVs in the left panel, then say **compare selected csvs**.');
+    updateStatus('Ready');
+    return;
+  }
+  if (checked.length === 1) {
+    addMessage('🤖', `⚠️ You selected one CSV (<code>${checked[0]}</code>). Please select **exactly two** CSVs to compare.`);
+    updateStatus('Ready');
+    return;
+  }
+  if (checked.length > 2) {
+    addMessage('🤖', `⚠️ You selected ${checked.length} CSVs. Please select **exactly two**.`);
+    updateStatus('Ready');
+    return;
+  }
+
+  const chat = document.getElementById('chatContainer');
+  const card = document.createElement('div');
+  card.className = 'network-container';
+  card.innerHTML = `<h3>Compare CSVs</h3><p class="muted">Working…</p>`;
+  chat.appendChild(card);
+  chat.scrollTop = chat.scrollHeight;
+
+  try {
+    const res = await fetch('/compare_csvs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filenames: checked })
+    });
+    const out = await res.json();
+
+    if (!out || !out.success) {
+      card.innerHTML = `<h3>Compare CSVs</h3><p style="color:#dc3545">❌ ${out?.error || 'Comparison failed'}</p>`;
+      return;
+    }
+
+    // unpack with safe fallbacks
+    const A = out.summary?.file_a || {};
+    const B = out.summary?.file_b || {};
+    const schema = out.schema || {};
+    const taxon  = out.taxon  || {};
+
+    // helpers
+    const list = (arr, empty='—') =>
+      (arr && arr.length) ? `<code>${arr.join('</code>, <code>')}</code>` : `<span class="muted">${empty}</span>`;
+    const cap  = (x) => (x ?? '—');
+
+    card.innerHTML = `
+      <h3>Compare CSVs</h3>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
+        <div>
+          <p><strong>${cap(A.filename)}</strong></p>
+          <p class="muted">Rows: ${cap(A.rows)} · Cols: ${cap(A.cols)}</p>
+        </div>
+        <div>
+          <p><strong>${cap(B.filename)}</strong></p>
+          <p class="muted">Rows: ${cap(B.rows)} · Cols: ${cap(B.cols)}</p>
+        </div>
+      </div>
+
+      <div style="margin-bottom:10px">
+        <p><strong>Shared columns</strong> (${(schema.shared_columns || []).length})</p>
+        <p>${list(schema.shared_columns)}</p>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px;">
+        <div>
+          <p><strong>Only in ${cap(A.short || 'A')}</strong> (${(schema.only_in_a || []).length})</p>
+          <p>${list(schema.only_in_a)}</p>
+        </div>
+        <div>
+          <p><strong>Only in ${cap(B.short || 'B')}</strong> (${(schema.only_in_b || []).length})</p>
+          <p>${list(schema.only_in_b)}</p>
+        </div>
+      </div>
+
+      <div>
+        <p><strong>Taxon/Feature overlap</strong> ${taxon.column_used ? `(by <code>${taxon.column_used}</code>)` : ''}</p>
+        <p>Overlap: <strong>${cap(taxon.overlap_count)}</strong> · Only in ${cap(A.short || 'A')}: <strong>${cap(taxon.only_in_a_count)}</strong> · Only in ${cap(B.short || 'B')}: <strong>${cap(taxon.only_in_b_count)}</strong></p>
+        ${(taxon.sample && (taxon.sample.overlap || []).length) ? `
+          <details style="margin-top:6px;">
+            <summary>Show examples</summary>
+            <p class="muted">Overlap: ${list(taxon.sample.overlap)}</p>
+            <p class="muted">Only in ${cap(A.short || 'A')}: ${list(taxon.sample.only_in_a)}</p>
+            <p class="muted">Only in ${cap(B.short || 'B')}: ${list(taxon.sample.only_in_b)}</p>
+          </details>` : ''
+        }
+      </div>
+    `;
+
+    chat.scrollTop = chat.scrollHeight;
+  } catch (e) {
+    card.innerHTML = `<h3>Compare CSVs</h3><p style="color:#dc3545">❌ ${e.message}</p>`;
+  }
+}
+
+      
+        // You already have updatePdfDisplay(); keep it as is.
+        </script>
+        <!-- keep your <style> … </style> after this -->
+      
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -79,6 +340,8 @@
         }
 
         .feature-list li:last-child { border-bottom: none; }
+
+        .muted { color:#6c757d; } 
 
         .upload-section {
             background: #e3f2fd;
@@ -282,9 +545,64 @@
             line-height: 1.3;
             display: inline;
         }
+        /* stacked, multi-line DNA blocks */
+        .seq-block{
+            font-family: ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
+            white-space: pre-wrap;
+            word-break: break-word;
+            line-height: 1.3;
+            display: block;            /* forces its own line like in the screenshot */
+        }
+
 
         /* long tokens in user messages (kept for compatibility if used elsewhere) */
         .user-long-token { display: inline-block; max-width: 100%; white-space: nowrap; overflow-x: auto; vertical-align: bottom; }
+
+        table {
+            table-layout: fixed;   /* prevent columns from expanding */
+            width: 100%;           /* force table to fit container */
+            border-collapse: collapse;
+        }
+
+        /* make preview cells truncate nicely and show a pointer cursor on hover */
+        .truncate-cell {
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          max-width: 420px;   /* adjust if you want wider cells */
+        }
+
+        .truncate-cell.seq {  /* sequences look better monospace */
+          font-family: ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
+          letter-spacing: .02em;
+          cursor: help;       /* indicates there's more info on hover */
+        }
+
+        /* Accordion */
+        .accordion-header{
+            display:flex;
+            align-items:center;
+            justify-content:space-between;
+            cursor:pointer;
+            user-select:none;
+            font-weight:600;
+            padding:6px 2px;
+        }
+
+        .accordion-header .chevron{
+            transition: transform .18s ease;
+            font-size: 1.1em;
+            line-height: 1;
+        }
+
+        .accordion-header[aria-expanded="true"] .chevron{
+            transform: rotate(90deg);
+        }
+
+        .accordion-content{
+            margin-top:8px;
+        }
+
 
         @media (max-width: 768px) {
             .container { flex-direction: column; height: 100vh; width: 100%; border-radius: 0; }
@@ -317,7 +635,10 @@
                     <div id="uploaded-files-list">
                         <h4>Uploaded Files:</h4>
                         <div id="files-display"></div>
+                        <button id="previewBtn" class="btn" style="margin-top:10px;background:#0d6efd">
+                                Preview Selected</button>
                     </div>
+                    
                 </div>
 
                 <div class="feature-section">
@@ -380,6 +701,26 @@
                 MicrobiomeBot is thinking...
             </div>
 
+            <!-- Explain Interaction UI -->
+            <div id="edgeExplainUI" class="network-container accordion" style="margin-top:10px">
+                <div id="edgeExplainToggle" class="accordion-header" role="button" tabindex="0" aria-expanded="false">
+                  <span>Explain an interaction</span>
+                  <span class="chevron" aria-hidden="true">▸</span>
+                </div>
+              
+                <div id="edgeExplainContent" class="accordion-content" hidden>
+                  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin:10px 0;">
+                    <input id="exSpecies1" class="file-input" placeholder="Enter the full otu Label  (e.g., CGGGACTT....)" />
+                    <input id="exSpecies2" class="file-input" placeholder="Enter the full Otu Label (e.g., CGGGACTTA.....)" />
+                  </div>
+                  <div style="display:flex;gap:8px;">
+                    <button class="btn" onclick="explainEdge()">Explain</button>
+                    <button class="btn" style="background:#6c757d" onclick="runNullTest()">Null test (quick)</button>
+                  </div>
+                  <p class="muted" style="margin-top:8px">Tip: you can also click an edge in the network (if available) to auto-fill & explain.</p>
+                </div>
+              </div>              
+  
             <div class="input-container">
                 <textarea type="text" class="message-input" id="messageInput" 
                        placeholder="Ask me about microbiome interactions..." 
@@ -394,10 +735,28 @@
         let chatHistory = [];
         let isAnalyzing = false;
 
+        function updatePdfDisplay() {
+            const input = document.getElementById('pdf-upload');
+            const out   = document.getElementById('pdf-file-display');
+            const files = Array.from(input.files || []);
+            out.innerHTML = files.length ? files.map(f => `• ${f.name}`).join('<br>') : '';
+        }
+
         function updateStatus(message, color = '#28a745') {
             const status = document.getElementById('status');
             status.textContent = message;
             status.style.background = color;
+        }
+
+        function updateProgress(message, percentage = null) {
+            const status = document.getElementById('status');
+            if (percentage !== null) {
+                status.textContent = `${message} (${percentage}%)`;
+                status.style.background = '#ffc107';
+            } else {
+                status.textContent = message;
+                status.style.background = '#17a2b8';
+            }
         }
 
         // helper: wrap long DNA strings with <wbr> every 64 chars
@@ -407,6 +766,22 @@
                 return `<span class="seq-wrap">${m.replace(new RegExp(`(.{${chunk}})`, 'g'), '$1<wbr>')}</span>`;
             });
         }
+
+        // Turn a long DNA string into stacked 64-char lines with a hover tooltip
+        function asStackedDNA(s, chunk=64){
+            if (!s) return s;
+            const isDNA = /^[ACGTNacgtn]+$/.test(s);
+            if (!isDNA || s.length <= chunk) return s;  // short or non-DNA: leave as-is
+            const chunks = s.match(new RegExp(`.{1,${chunk}}`, 'g')) || [s];
+            // tooltip has full sequence; body shows stacked lines
+            return `<span class="seq-block" title="${s}">${chunks.join('<br>')}</span>`;
+        }
+
+        // Find long DNA runs in an HTML string and replace them with the stacked block
+        function replaceLongDNAInHTML(html, chunk=64){
+            return html.replace(/([ACGTNacgtn]{60,})/g, (m) => asStackedDNA(m, chunk));
+        }
+
 
         function addMessage(sender, content) {
             const chatContainer = document.getElementById('chatContainer');
@@ -523,17 +898,35 @@
             const input = document.getElementById('messageInput');
             const message = input.value.trim();
             if (!message) return;
+
+            // handle: "compare selected csvs", "compare the selected csvs", "compare two selected csv"
+            const compareCmd = /^\s*compare(?:\s+(?:the|two))?(?:\s+selected)?(?:\s+csvs?)?\s*$/i;
+            if (compareCmd.test(message)) {
+                // 1) show the user's question bubble
+                addMessage(message);
+
+                // 2) clear input like normal
+                input.value = '';
+                input.style.height = '50px';
+
+                // 3) optional status / typing
+                updateStatus('Comparing…', '#ffc107');
+                // showTyping(); // uncomment if you want the typing dots
+
+                try {
+                    // 4) run the compare (async)
+                    await compareSelectedCSVs();
+                } finally {
+                    updateStatus('Ready');
+                    // hideTyping(); // if you enabled showTyping above
+                }
+                return; // don't fall through to /chat
+            }
+
             
             addMessage(message);
             input.value = '';
             input.style.height = '50px'; // Reset textarea height
-            
-            // Check if this is a "why" question about specific species
-            const whyMatch = message.match(/why.*?(\w+).*?(\w+).*?interact/i);
-            if (whyMatch && whyMatch[1] && whyMatch[2]) {
-                await explainWhyInteraction(whyMatch[1], whyMatch[2]);
-                return;
-            }
             
             showTyping();
             updateStatus('Processing...', '#ffc107');
@@ -579,6 +972,7 @@
             
             isAnalyzing = true;
             updateStatus('Analyzing data...', '#ffc107');
+            updateProgress('Preprocessing data...', 10);
             
             const csvFiles = [];
             const depthFiles = [];
@@ -643,86 +1037,138 @@
                 }
             }
             
-            // Process CSV files for microbiome analysis
-            if (csvFiles.length > 0) {
-                if (csvFiles.length === 1) {
-                    const file = csvFiles[0];
-                    addMessage('🤖', `🧬 Analyzing microbiome data: ${file.name}`);
-                    try {
-                        const text = await file.text();
-                        const lines = text.split('\n');
-                        const headers = lines[0].split(',').map(h => h.trim());
-                        const otuData = {};
-                        headers.forEach(header => { otuData[header] = []; });
-                        for (let i = 1; i < lines.length; i++) {
-                            if (lines[i].trim()) {
-                                const values = lines[i].split(',');
-                                headers.forEach((header, index) => {
-                                    const value = values[index] ? values[index].trim() : '';
-                                    const numValue = parseFloat(value);
-                                    otuData[header].push(isNaN(numValue) ? value : numValue);
-                                });
-                            }
-                        }
-                        const response = await fetch('/analyze', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ otu_data: otuData, filename: file.name })
-                        });
-                        const result = await response.json();
-                        if (result && result.error) addMessage('🤖', `❌ Analysis failed for ${file.name}: ${result.error}`);
-                        else addMessage('🤖', `🎉 Analysis complete! Found ${result.num_interactions || 0} interactions in ${file.name}. You can now ask questions or request visualizations.`);
-                    } catch (error) {
-                        addMessage('🤖', `❌ Error processing ${file.name}: ${error.message}`);
-                    }
-                } else {
-                    addMessage('🤖', `🧬 Analyzing ${csvFiles.length} microbiome datasets simultaneously...`);
-                    try {
-                        const filePromises = csvFiles.map(async (file) => {
-                            const text = await file.text();
-                            const lines = text.split('\n');
-                            const headers = lines[0].split(',').map(h => h.trim());
-                            const otuData = {};
-                            headers.forEach(header => { otuData[header] = []; });
-                            for (let i = 1; i < lines.length; i++) {
-                                if (lines[i].trim()) {
-                                    const values = lines[i].split(',');
-                                    headers.forEach((header, index) => {
-                                        const value = values[index] ? values[index].trim() : '';
-                                        const numValue = parseFloat(value);
-                                        otuData[header].push(isNaN(numValue) ? value : numValue);
-                                    });
-                                }
-                            }
-                            return { filename: file.name, otu_data: otuData };
-                        });
-                        const allFilesData = await Promise.all(filePromises);
-                        const response = await fetch('/analyze_multiple', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ files: allFilesData })
-                        });
-                        const result = await response.json();
-                        if (result && result.error) addMessage('🤖', `❌ Multi-file analysis failed: ${result.error}`);
-                        else {
-                            addMessage('🤖', result.message);
-                            if (result.success) addMessage('🤖', `📊 Combined dataset ready! Ask for "summary", "network visualization", or specific questions about the interactions.`);
-                        }
-                    } catch (error) {
-                        addMessage('🤖', `❌ Error in multi-file analysis: ${error.message}`);
-                    }
+            
+// Process CSV files for microbiome analysis
+if (csvFiles.length > 0) {
+    if (csvFiles.length === 1) {
+        const file = csvFiles[0];
+        addMessage('🤖', `🧬 Analyzing microbiome data: ${file.name}`);
+        try {
+            const text = await file.text();
+            const lines = text.split('\n');
+            const headers = lines[0].split(',').map(h => h.trim());
+            const otuData = {};
+            headers.forEach(header => { otuData[header] = []; });
+            for (let i = 1; i < lines.length; i++) {
+                if (lines[i].trim()) {
+                    const values = lines[i].split(',');
+                    headers.forEach((header, index) => {
+                        const value = values[index] ? values[index].trim() : '';
+                        const numValue = parseFloat(value);
+                        otuData[header].push(isNaN(numValue) ? value : numValue);
+                    });
                 }
             }
-            
-            isAnalyzing = false;
+            updateProgress('Running R analysis...', 30);
+            const response = await fetch('/analyze', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ otu_data: otuData, filename: file.name })
+            });
+            updateProgress('Processing results...', 80);
+            const result = await response.json();
+            if (result && result.error) addMessage('🤖', `❌ Analysis failed for ${file.name}: ${result.error}`);
+            else addMessage('🤖', `🎉 Analysis complete! Found ${result.num_interactions || 0} interactions in ${file.name}. You can now ask questions or request visualizations.`);
+                await updateFilesList();
+        } catch (error) {
+            addMessage('🤖', `❌ Error processing ${file.name}: ${error.message}`);
+        }
+    } else if (csvFiles.length === 2) {
+        addMessage('🤖', `🧬 Pairwise analysis for: ${csvFiles[0].name} & ${csvFiles[1].name}`);
+        try {
+            const filePromises = csvFiles.map(async (file) => {
+                const text = await file.text();
+                const lines = text.split('\n');
+                const headers = lines[0].split(',').map(h => h.trim());
+                const otuData = {};
+                headers.forEach(header => { otuData[header] = []; });
+                for (let i = 1; i < lines.length; i++) {
+                    if (lines[i].trim()) {
+                        const values = lines[i].split(',');
+                        headers.forEach((header, index) => {
+                            const value = values[index] ? values[index].trim() : '';
+                            const numValue = parseFloat(value);
+                            otuData[header].push(isNaN(numValue) ? value : numValue);
+                        });
+                    }
+                }
+                return { filename: file.name, otu_data: otuData };
+            });
+            const twoFiles = await Promise.all(filePromises);
+            const resp = await fetch('/analyze_pairwise', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ files: twoFiles })
+            });
+            const out = await resp.json();
+            if (!out.success) {
+                addMessage('🤖', `⚠️ Pairwise ingest/compare did not run: ${out.error || out.message || 'unknown issue'}`);
+            } else {
+                let msg = `✅ ${out.message}`;
+                if (out.pairwise_type && out.pairwise_type !== 'ingested') {
+                    msg += ` (type: ${out.pairwise_type})`;
+                }
+                addMessage('🤖', msg);
+                await updateFilesList();
+                if (out.pairwise_type === 'interactions' && out.comparison) {
+                    const c = out.comparison;
+                    addMessage('🤖', `Overlap edges: ${c.overlap_edges_count} | Added: ${c.added_edges_count} | Removed: ${c.removed_edges_count}`);
+                }
+            }
+        } catch (error) {
+            addMessage('🤖', `❌ Error in pairwise analysis: ${error.message}`);
+        }
+    } else {
+        addMessage('🤖', `🧬 Ingesting ${csvFiles.length} microbiome CSVs.`);
+        try {
+            const filePromises = csvFiles.map(async (file) => {
+                const text = await file.text();
+                const lines = text.split('\n');
+                const headers = lines[0].split(',').map(h => h.trim());
+                const otuData = {};
+                headers.forEach(header => { otuData[header] = []; });
+                for (let i = 1; i < lines.length; i++) {
+                    if (lines[i].trim()) {
+                        const values = lines[i].split(',');
+                        headers.forEach((header, index) => {
+                            const value = values[index] ? values[index].trim() : '';
+                            const numValue = parseFloat(value);
+                            otuData[header].push(isNaN(numValue) ? value : numValue);
+                        });
+                    }
+                }
+                return { filename: file.name, otu_data: otuData };
+            });
+            const allFilesData = await Promise.all(filePromises);
+            updateProgress('Running R analysis...', 30);
+            const response = await fetch('/analyze_multiple', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ files: allFilesData })
+            });
+            const result = await response.json();
+            updateProgress('Processing results...', 80);
+            if (result && result.error) addMessage('🤖', `❌ Multi-file ingest failed: ${result.error}`);
+            else {
+                addMessage('🤖', result.message);
+                if (result.success) addMessage('🤖', `📊 All datasets are now available. Ask for "summary", "network visualization", or specific questions about the interactions or taxonomy.`);
+            }
+        } catch (error) {
+            addMessage('🤖', `❌ Error in multi-file ingest: ${error.message}`);
+        }
+    }
+}
+
             updateStatus('Ready');
+            updateProgress('Complete!', 100);
+            setTimeout(() => updateStatus('Ready'), 2000);
         }
 
         async function showNetwork() {
             try {
                 const response = await fetch('/network');
                 const data = await response.json();
-                if (data.error) { addMessage(`Cannot generate network: ${data.error}`); return; }
+                if (data.error) { addMessage('🤖', `Cannot generate network: ${data.error}`); return; }
                 
                 const networkContainer = document.createElement('div');
                 networkContainer.className = 'network-container';
@@ -732,6 +1178,7 @@
                 plotDiv.style.height = '400px';
                 networkContainer.appendChild(plotDiv);
                 
+                const stats = data.network_stats || {};
                 const statsDiv = document.createElement('div');
                 statsDiv.innerHTML = `
                     <p><strong>Network Statistics:</strong></p>
@@ -744,10 +1191,25 @@
                 
                 const plotData = JSON.parse(data.plot_json);
                 Plotly.newPlot(plotDiv, plotData.data, plotData.layout, {responsive:true});
+                // after Plotly.newPlot(plotDiv, plotData.data, plotData.layout, {responsive:true});
                 
+                plotDiv.on('plotly_click', (ev) => {
+                    const pt = ev?.points?.[0];
+                    const cd = pt?.customdata;
+                    if (Array.isArray(cd) && cd.length >= 2) {
+                        const s1 = cd[0], s2 = cd[1], label = cd[2] || 'Unknown';
+                        // reflect into UI inputs (nice for transparency)
+                        openExplainPanel();
+                        const a = document.getElementById('exSpecies1'); if (a) a.value = s1;
+                        const b = document.getElementById('exSpecies2'); if (b) b.value = s2;
+                        const c = document.getElementById('exLabel');    if (c) c.value = label || '';
+                        explainEdge(s1, s2, label);
+                    }
+                });
+
                 document.getElementById('chatContainer').scrollTop = document.getElementById('chatContainer').scrollHeight;
             } catch (error) {
-                addMessage('Error generating network visualization.');
+                addMessage('🤖','Error generating network visualization.');
                 console.error('Network error:', error);
             }
         }
@@ -756,7 +1218,7 @@
             try {
                 const res = await fetch('/depth');
                 const data = await res.json();
-                if (!data.success) { addMessage(`Depth viewer error: ${data.error || 'not available'}`); return; }
+                if (!data.success) { addMessage('🤖', `Depth viewer error: ${data.error || 'not available'}`); return; }
 
                 const card = document.createElement('div');
                 card.className = 'network-container';
@@ -803,27 +1265,8 @@
 
                 document.getElementById('chatContainer').scrollTop = document.getElementById('chatContainer').scrollHeight;
             } catch (e) {
-                addMessage('Error loading depth plots.');
+                addMessage('🤖','Error loading depth plots.');
                 console.error(e);
-            }
-        }
-
-        async function explainWhyInteraction(species1, species2) {
-            try {
-                updateStatus('Generating explanation...', '#ffc107');
-                const response = await fetch('/explain_why_interaction', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ species1: species1, species2: species2 })
-                });
-                const data = await response.json();
-                if (data.error) { addMessage(`Cannot explain interaction: ${data.error}`); updateStatus('Error', '#dc3545'); return; }
-                showExplanationModal(data);
-                updateStatus('Ready');
-            } catch (error) {
-                addMessage('🤖', 'Error generating explanation. Please try again.');
-                updateStatus('Error', '#dc3545');
-                console.error('Explanation error:', error);
             }
         }
 
@@ -918,21 +1361,13 @@
             document.getElementById('chatContainer').scrollTop = document.getElementById('chatContainer').scrollHeight;
         }
 
-        function addWhyLogicExamples() {
-            const exampleContainer = document.querySelector('.example-queries');
-            if (exampleContainer) {
-                const whyExamples = [
-                    'Why do Bacteroides and Lactobacillus interact?',
-                    'Explain the reasoning behind this interaction',
-                    'What evidence supports this relationship?'
-                ];
-                whyExamples.forEach(example => {
-                    const exampleDiv = document.createElement('div');
-                    exampleDiv.className = 'example-query';
-                    exampleDiv.textContent = example;
-                    exampleDiv.onclick = () => sendExampleQuery(example);
-                    exampleContainer.appendChild(exampleDiv);
-                });
+        // helper to programmatically open the Explain panel
+        function openExplainPanel(){
+            const header  = document.getElementById('edgeExplainToggle');
+            const content = document.getElementById('edgeExplainContent');
+            if (header && content && content.hasAttribute('hidden')) {
+                content.removeAttribute('hidden');
+                header.setAttribute('aria-expanded', 'true');
             }
         }
 
@@ -960,43 +1395,41 @@
             fileInput.value = '';
         }
 
-        async function updateFilesList() {
-            try {
-                const response = await fetch('/get_uploaded_files');
-                const result = await response.json();
-                const filesDisplay = document.getElementById('files-display');
-                if (result.success && result.files) {
-                    let html = '';
-                    if (result.files.csv_files && Object.keys(result.files.csv_files).length > 0) {
-                        html += '<h5>CSV Files:</h5><ul>';
-                        for (const [filename, info] of Object.entries(result.files.csv_files)) {
-                            html += `<li>${filename} (${info.timestamp})</li>`;
-                        }
-                        html += '</ul>';
-                    }
-                    if (result.files.pdf_files && Object.keys(result.files.pdf_files).length > 0) {
-                        html += '<h5>PDF Files:</h5><ul>';
-                        for (const [filename, info] of Object.entries(result.files.pdf_files)) {
-                            html += `<li>${filename} (${info.timestamp})</li>`;
-                        }
-                        html += '</ul>';
-                    }
-                    if (html === '') html = '<p>No files uploaded yet.</p>';
-                    filesDisplay.innerHTML = html;
+        
+async function updateFilesList() {
+    try {
+        const response = await fetch('/get_uploaded_files');
+        const result = await response.json();
+        const filesDisplay = document.getElementById('files-display');
+        if (result.success && result.files) {
+            let html = '';
+            const csvs = result.files.csv_files || {};
+            if (Object.keys(csvs).length > 0) {
+                html += '<h5>CSV Files:</h5>';
+                html += '<ul style="list-style:none;padding-left:0;margin:0">';
+                for (const [filename, info] of Object.entries(csvs)) {
+                    const stamp = info && info.timestamp ? ` <span style="color:#6c757d">(${info.timestamp})</span>` : '';
+                    html += `<li style="margin:6px 0">
+                        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                            <input type="checkbox" class="csv-checkbox" value="${filename}">
+                            <span>${filename}${stamp}</span>
+                        </label>
+                    </li>`;
                 }
-            } catch (error) {
-                console.error('Error updating files list:', error);
+                html += '</ul>';
+            } else {
+                html = '<p>No CSVs uploaded yet.</p>';
             }
+            filesDisplay.innerHTML = html;
         }
-
-        document.addEventListener('DOMContentLoaded', function() {
-            document.getElementById('messageInput').focus();
-            addWhyLogicExamples();
-        });
+    } catch (err) {
+        console.error('updateFilesList failed:', err);
+    }
+}
 
         async function refreshChatHistory() {
             try {
-                const response = await fetch('/refresh_chat_history');
+                const response = await fetch('/history');
                 const data = await response.json();
                 if (data.success) {
                     const chatContainer = document.getElementById('chatContainer');
@@ -1022,6 +1455,144 @@
                 textArea.scrollTop = (currentLine * lineHeight) - textArea.clientHeight + lineHeight;
             }
         }
+
+
+    async function explainEdge(species1, species2, label) {
+        // Allow programmatic calls OR form-driven calls
+        if (!species1 || !species2) {
+            species1 = (document.getElementById('exSpecies1')?.value || '').trim();
+            species2 = (document.getElementById('exSpecies2')?.value || '').trim();
+            label    = (document.getElementById('exLabel')?.value || '').trim();
+        }
+
+        const chat = document.getElementById('chatContainer');
+        const card = document.createElement('div');
+        card.className = 'network-container';
+        card.innerHTML = `<h3>Proof trace</h3><p class="muted">Explaining <code>${species1}</code> vs <code>${species2}</code>…</p>`;
+        chat.appendChild(card);
+        chat.scrollTop = chat.scrollHeight;
+
+        if (!species1 || !species2) {
+            card.innerHTML = `<h3>Proof trace</h3><p style="color:#dc3545">❌ Please provide both species names.</p>`;
+            return;
+        }
+
+        try {
+            const res = await fetch('/explain_detailed', {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({ species1, species2, label: label || 'Unknown' })
+            });
+            const out = await res.json();
+            if (!out.success) {
+                card.innerHTML = `<h3>Proof trace</h3><p style="color:#dc3545">❌ ${out.error || 'Could not explain this interaction.'}</p>`;
+                return;
+            }
+            renderProofCard(card, species1, species2, label, out);
+        } catch (e) {
+            card.innerHTML = `<h3>Proof trace</h3><p style="color:#dc3545">❌ ${e.message}</p>`;
+        }
+    }
+
+    function renderProofCard(container, species1, species2, label, data) {
+        // data.steps: array of strings
+        // data.evidence: { n_samples, median, counts, fractions, correlation, rule_texts }
+        const steps = (data.steps || []).map(s => `<li>${escapeHtml(s)}</li>`).join('');
+
+        const ev = data.evidence || {};
+        const med = ev.median || {};
+        const counts = ev.counts || {};
+        const fracs = ev.fractions || {};
+        const corr = ev.correlation || {};
+        const rules = (ev.rule_texts || []).map(r => `<li>${escapeHtml(r)}</li>`).join('');
+
+        container.innerHTML = `
+    <h3>Proof trace: <code>${escapeHtml(species1)}</code> ↔ <code>${escapeHtml(species2)}</code>${label ? ` <small class="muted">(${escapeHtml(label)})</small>` : ''}</h3>
+    <ol style="margin:8px 0 12px 20px">${steps}</ol>
+
+    <details>
+      <summary>Evidence details</summary>
+      <div style="margin-top:8px">
+        <p class="muted">Samples used: <strong>${ev.n_samples ?? '—'}</strong></p>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+          <div>
+            <p><strong>Medians</strong></p>
+            <p><code>${escapeHtml(species1)}</code>: ${fmtNum(med[species1])} &nbsp;·&nbsp; <code>${escapeHtml(species2)}</code>: ${fmtNum(med[species2])}</p>
+          </div>
+          <div>
+            <p><strong>Correlation</strong></p>
+            <p>Spearman: ${fmtNum(corr.spearman)} &nbsp;·&nbsp; Pearson: ${fmtNum(corr.pearson)}</p>
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">
+          <div>
+            <p><strong>Counts</strong></p>
+            <p>both-high=${counts.both_high ?? '—'}, both-low=${counts.both_low ?? '—'}, hi-low=${counts.hi_low ?? '—'}, low-hi=${counts.low_hi ?? '—'}</p>
+          </div>
+          <div>
+            <p><strong>Fractions</strong></p>
+            <p>concordant=${fmtNum(fracs.concordant)}, discordant=${fmtNum(fracs.discordant)}</p>
+          </div>
+        </div>
+        <div style="margin-top:8px">
+          <p><strong>Derived rules</strong></p>
+          <ul style="margin-left:18px">${rules || '<li class="muted">No strong rule fired; showing descriptive stats.</li>'}</ul>
+        </div>
+      </div>
+    </details>
+    `;
+    // After building the card:
+    container.innerHTML = replaceLongDNAInHTML(container.innerHTML);
+    }
+    
+    function fmtNum(v) { return (v === undefined || v === null || Number.isNaN(v)) ? '—' : (typeof v === 'number' ? (''+v) : escapeHtml(v)); }
+    function escapeHtml(s) {
+        return String(s ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+    }
+
+    // Quick null test card
+    async function runNullTest() {
+        const chat = document.getElementById('chatContainer');
+        const card = document.createElement('div');
+        card.className = 'network-container';
+        card.innerHTML = `<h3>Null/random comparison</h3><p class="muted">Running…</p>`;
+        chat.appendChild(card);
+        chat.scrollTop = chat.scrollHeight;
+
+        try {
+            const res = await fetch('/network_null_test?n=200');
+            const out = await res.json();
+            if (!out.success) {
+                card.innerHTML = `<h3>Null/random comparison</h3><p style="color:#dc3545">❌ ${out.error || 'Failed.'}</p>`;
+                return;
+            }
+            card.innerHTML = `
+      <h3>Null/random comparison</h3>
+      <p>Observed mean |Spearman| on inferred edges: <strong>${out.observed_mean_abs_spearman}</strong></p>
+      <p>Null mean: ${out.null_mean} &nbsp;·&nbsp; Null std: ${out.null_std}</p>
+      <p>Z-score: <strong>${out.z_score}</strong> &nbsp;·&nbsp; Permutation p (upper tail): <strong>${out.permutation_p_upper}</strong></p>
+      <p class="muted">Pairs tested: ${out.num_inferred_pairs_tested} &nbsp;·&nbsp; Null draws: ${out.num_null_draws}</p>
+    `;
+        } catch (e) {
+            card.innerHTML = `<h3>Null/random comparison</h3><p style="color:#dc3545">❌ ${e.message}</p>`;
+        }
+    }
+
+document.addEventListener("copy", (e) => {
+  const selection = window.getSelection();
+  if (!selection.rangeCount) return;
+
+  const node = selection.anchorNode;
+  if (!node) return;
+
+  // Find nearest cell (th/td)
+  const cell = node.nodeType === 1 ? node : node.parentElement;
+  if (cell && cell.dataset && cell.dataset.fullvalue) {
+    e.clipboardData.setData("text/plain", cell.dataset.fullvalue);
+    e.preventDefault();  // stop default truncated copy
+  }
+});
+
     </script>
 </body>
 </html>
