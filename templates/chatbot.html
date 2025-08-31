@@ -5,7 +5,7 @@
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
         <title>MicrobiomeBot - XAI Chatbot</title>
       
-        <!-- Load Plotly (no inline JS here) -->
+        
         <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
         
         <script>
@@ -13,13 +13,13 @@
               if (value === undefined || value === null) return { text: "", className: "" };
             
               const s = String(value);
-              const isSequence = /^[ACGTNacgtn]+$/i.test(s); // DNA-ish strings
-              const limit = isSequence ? 12 : 32;            // first N chars to keep
+              const isSequence = /^[ACGTNacgtn]+$/i.test(s); 
+              const limit = isSequence ? 12 : 32;           
             
               if (s.length > limit) {
                 return {
-                  text: s.slice(0, limit) + "…",   // e.g., CGGGACTTAA... 
-                  title: s,                         // full value on hover
+                  text: s.slice(0, limit) + "…",    
+                  title: s,                         
                   className: isSequence ? "truncate-cell seq" : "truncate-cell"
                 };
               }
@@ -31,7 +31,7 @@
             }
         </script>
             
-        <!-- Your app JS goes in a separate tag -->
+        
         <script>
         async function previewSelectedCSVs() {
           const boxes = Array.from(document.querySelectorAll('.csv-checkbox:checked'));
@@ -65,11 +65,11 @@
                 th.style.background = '#f1f3f5';
                 th.style.textAlign = 'left';
                 if (isOTU) {
-                  th.style.maxWidth = "60px";   // adjust as needed
+                  th.style.maxWidth = "60px";   
                   th.style.overflow = "hidden";
                   th.style.textOverflow = "ellipsis";
                   th.style.whiteSpace = "nowrap";
-                  th.title = col; // show full name on hover
+                  th.title = col; // shows full name on hover
                 }
                 trh.appendChild(th);
               });
@@ -91,7 +91,7 @@
                   td.style.border = '1px solid #e9ecef';
                   td.style.padding = '6px';
                   if (isOTU) {
-                    td.style.maxWidth = "60px";   // numbers don't need much space
+                    td.style.maxWidth = "60px";   
                     td.style.overflow = "hidden";
                     td.style.textOverflow = "ellipsis";
                     td.style.whiteSpace = "nowrap";
@@ -110,13 +110,9 @@
           }
         }
 
-                // Consolidated DOMContentLoaded listener - replaces all separate listeners
+                
                 document.addEventListener('DOMContentLoaded', () => {
-            // 1. Preview button setup (from line 114-117)
-            const previewBtn = document.getElementById('previewBtn');
-            if (previewBtn) previewBtn.addEventListener('click', previewSelectedCSVs);
             
-            // 2. Explain panel toggle setup (from line 1339-1370)
             const header = document.getElementById('edgeExplainToggle');
             const content = document.getElementById('edgeExplainContent');
 
@@ -139,16 +135,16 @@
                     if (e.key === 'ArrowLeft')  toggle(false);
                 });
 
-                // start collapsed
+                
                 toggle(false);
-                // Open panel when inputs get focus
+               
                 ['exSpecies1','exSpecies2','exLabel'].forEach(id=>{
                     const el = document.getElementById(id);
                     if (el) el.addEventListener('focus', openExplainPanel);
                 });
             }
             
-            // 3. Update files list (from line 1427-1429)
+            
             updateFilesList();
         });
       
@@ -187,6 +183,12 @@
   chat.appendChild(card);
   chat.scrollTop = chat.scrollHeight;
 
+  
+  const list = (arr, empty='—') =>
+    (arr && arr.length) ? `<code>${arr.join('</code>, <code>')}</code>` : `<span class="muted">${empty}</span>`;
+  const cap  = (x) => (x ?? '—');
+  const safeId = (prefix) => `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
+
   try {
     const res = await fetch('/compare_csvs', {
       method: 'POST',
@@ -200,16 +202,11 @@
       return;
     }
 
-    // unpack with safe fallbacks
+    
     const A = out.summary?.file_a || {};
     const B = out.summary?.file_b || {};
     const schema = out.schema || {};
     const taxon  = out.taxon  || {};
-
-    // helpers
-    const list = (arr, empty='—') =>
-      (arr && arr.length) ? `<code>${arr.join('</code>, <code>')}</code>` : `<span class="muted">${empty}</span>`;
-    const cap  = (x) => (x ?? '—');
 
     card.innerHTML = `
       <h3>Compare CSVs</h3>
@@ -242,7 +239,7 @@
       </div>
 
       <div>
-        <p><strong>Taxon/Feature overlap</strong> ${taxon.column_used ? `(by <code>${taxon.column_used}</code>)` : ''}</p>
+        <p><strong>Taxon/Feature overlap</strong> ${taxon.column_used ? `(by <code>${taxon.column_used}</code>)` : '<span class="muted">(no matching ID columns)</span>'}</p>
         <p>Overlap: <strong>${cap(taxon.overlap_count)}</strong> · Only in ${cap(A.short || 'A')}: <strong>${cap(taxon.only_in_a_count)}</strong> · Only in ${cap(B.short || 'B')}: <strong>${cap(taxon.only_in_b_count)}</strong></p>
         ${(taxon.sample && (taxon.sample.overlap || []).length) ? `
           <details style="margin-top:6px;">
@@ -253,36 +250,176 @@
           </details>` : ''
         }
       </div>
+
+      ${out.data_quality ? `
+      <div style="margin-top:16px;">
+        <p><strong>📊 Data Quality</strong></p>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+          <div>
+            <p class="muted">Missing values: ${out.data_quality.missing_values.file_a}</p>
+            <p class="muted">Duplicate rows: ${out.data_quality.duplicate_rows.file_a}</p>
+            <p class="muted">Completeness: ${(out.data_quality.completeness_ratio.file_a * 100).toFixed(1)}%</p>
+          </div>
+          <div>
+            <p class="muted">Missing values: ${out.data_quality.missing_values.file_b}</p>
+            <p class="muted">Duplicate rows: ${out.data_quality.duplicate_rows.file_b}</p>
+            <p class="muted">Completeness: ${(out.data_quality.completeness_ratio.file_b * 100).toFixed(1)}%</p>
+          </div>
+        </div>
+      </div>` : ''}
+
+      ${out.statistics ? `
+      <div style="margin-top:16px;">
+        <p><strong>📈 Statistical Analysis</strong></p>
+        <p class="muted">Numeric columns analyzed: ${out.statistics.numeric_columns_count}</p>
+        ${out.statistics.correlations && Object.keys(out.statistics.correlations).length > 0 ? `
+          <details>
+            <summary>Column Correlations</summary>
+            ${Object.entries(out.statistics.correlations).slice(0,5).map(([col, corr]) =>
+              `<p class="muted">${col}: ${(+corr).toFixed(3)}</p>`
+            ).join('')}
+          </details>` : ''}
+      </div>` : ''}
+
+      ${out.sample_analysis ? `
+      <div style="margin-top:16px;">
+        <p><strong>🔗 Similarity Analysis</strong></p>
+        <p class="muted">Jaccard similarity: ${(out.sample_analysis.jaccard_similarity * 100).toFixed(1)}% (${out.sample_analysis.similarity_category})</p>
+        <p class="muted">Column overlap: ${out.sample_analysis.column_overlap_percentage.toFixed(1)}%</p>
+      </div>` : ''}
+
+      ${out.diversity_metrics ? `
+      <div style="margin-top:16px;">
+        <p><strong>🧬 Diversity Metrics</strong></p>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+          <div>
+            <p class="muted">Shannon diversity: ${out.diversity_metrics.shannon_diversity.file_a.toFixed(2)}</p>
+            <p class="muted">Richness: ${out.diversity_metrics.richness.file_a}</p>
+          </div>
+          <div>
+            <p class="muted">Shannon diversity: ${out.diversity_metrics.shannon_diversity.file_b.toFixed(2)}</p>
+            <p class="muted">Richness: ${out.diversity_metrics.richness.file_b}</p>
+          </div>
+        </div>
+      </div>` : ''}
+
+      ${out.recommendations ? `
+      <div style="margin-top:16px;">
+        <p><strong>💡 Recommendations</strong></p>
+        <p class="muted">Compatibility: ${out.recommendations.data_compatibility}</p>
+        <p class="muted">Merge feasibility: ${out.recommendations.merge_feasibility}</p>
+        <p class="muted">Quality score: ${(out.recommendations.quality_score * 100).toFixed(1)}%</p>
+        ${out.recommendations.suggested_actions && out.recommendations.suggested_actions.length > 0 ? `
+          <details>
+            <summary>Suggested Actions</summary>
+            ${out.recommendations.suggested_actions.map(action =>
+              `<p class="muted">• ${action}</p>`
+            ).join('')}
+          </details>` : ''}
+      </div>` : ''}
     `;
+
+    
+    if (!taxon.column_used && out.numeric_fallback) {
+      const nf = out.numeric_fallback;
+      const s = nf.summary || {};
+      const nfDiv = document.createElement('div');
+      nfDiv.style.marginTop = '16px';
+      nfDiv.innerHTML = `
+        <p><strong>🧮 Numeric fallback (no row IDs matched)</strong></p>
+        <p class="muted">Shared numeric sample columns: ${nf.shared_samples?.length || 0}</p>
+        <p class="muted">Mean 1−Bray–Curtis: ${(s.mean_bray_curtis_similarity || 0).toFixed(3)} · Mean Spearman: ${Number.isFinite(s.mean_spearman) ? s.mean_spearman.toFixed(3) : '—'}</p>
+        ${nf.per_sample && nf.per_sample.length ? `
+          <details style="margin-top:6px;">
+            <summary>Per-sample summary (first 12)</summary>
+            <div style="overflow:auto;margin-top:6px;">
+              <table>
+                <thead><tr><th>Sample</th><th>1−Bray–Curtis</th><th>Spearman</th><th>Pearson</th></tr></thead>
+                <tbody>
+                  ${nf.per_sample.slice(0,12).map(d =>
+                    `<tr>
+                       <td>${escapeHtml(d.sample)}</td>
+                       <td>${(+d.bray_curtis_similarity).toFixed(3)}</td>
+                       <td>${Number.isFinite(d.spearman) ? (+d.spearman).toFixed(3) : '—'}</td>
+                       <td>${Number.isFinite(d.pearson) ? (+d.pearson).toFixed(3) : '—'}</td>
+                     </tr>`
+                  ).join('')}
+                </tbody>
+              </table>
+            </div>
+          </details>` : ''}
+      `;
+      card.appendChild(nfDiv);
+    }
+
+    
+    const plots = out.plots || {};
+    const plotOrder = [
+      ['overlap_bar', 'ID Overlap'],
+      ['corr_bar', 'Column Correlations'],
+      ['degree_hist', 'Node Degree (File A)'],
+      ['per_sample_bray', 'Per-sample 1 − Bray–Curtis (fallback)'],
+      ['per_sample_spearman', 'Per-sample Spearman (fallback)'],
+    ];
+
+    const plotsContainer = document.createElement('div');
+    let hasAnyPlot = false;
+    plotsContainer.style.marginTop = '16px';
+    plotsContainer.innerHTML = `<p><strong>📉 Visualizations</strong></p>`;
+
+    plotOrder.forEach(([key, title]) => {
+      const spec = plots[key];
+      if (!spec || !spec.data || !spec.layout) return;
+      hasAnyPlot = true;
+      const id = safeId(`plot_${key}`);
+      const section = document.createElement('div');
+      section.style.marginTop = '10px';
+      section.innerHTML = `<p class="muted">${title}</p><div id="${id}" style="height:360px"></div>`;
+      plotsContainer.appendChild(section);
+
+      
+      queueMicrotask(() => {
+        try {
+          Plotly.newPlot(id, spec.data, spec.layout, { responsive: true });
+        } catch (e) {
+          console.error('Plot error:', key, e);
+        }
+      });
+    });
+
+    if (hasAnyPlot) card.appendChild(plotsContainer);
 
     chat.scrollTop = chat.scrollHeight;
   } catch (e) {
     card.innerHTML = `<h3>Compare CSVs</h3><p style="color:#dc3545">❌ ${e.message}</p>`;
+  } finally {
+    updateStatus('Ready');
   }
 }
 
+
       
-        // You already have updatePdfDisplay(); keep it as is.
+        
         </script>
-        <!-- keep your <style> … </style> after this -->
+        
       
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: #ffffff;           /* full-screen app (no gradient) */
+            background: #ffffff;           
             height: 100vh;
-            display: block;                /* cancel center flex */
+            display: block;                
         }
 
         .container {
-            width: 100vw;                  /* full width */
-            height: 100vh;                 /* full height */
+            width: 100vw;                  
+            height: 100vh;                 
             max-width: 100vw;
             background: white;
-            border-radius: 0;              /* square edges */
-            box-shadow: none;              /* no floating card */
+            border-radius: 0;              
+            box-shadow: none;              
             display: flex;
             overflow: hidden;
         }
@@ -418,17 +555,17 @@
             box-sizing: border-box;
         }
 
-        /* cap very tall user bubbles so earlier messages stay visible */
+        
         .long-message { max-height: 40vh; overflow-y: auto; }
 
-        /* wrap rules ONLY on user bubbles */
+        
         .message.user .message-content {
             white-space: pre-wrap;
             overflow-wrap: anywhere;
             word-break: break-word;
         }
 
-        /* bot bubbles render normally (prevents welcome text spacing issues) */
+        
         .message.bot .message-content { white-space: normal; }
 
         .message.user .message-content {
@@ -533,10 +670,10 @@
         #uploaded-files-list { margin-top: 20px; }
         #files-display { padding: 10px; border: 1px solid #ddd; border-radius: 5px; }
 
-        /* legacy scroll style — left for compatibility */
+        
         .otu-sequence { white-space: nowrap; overflow-x: auto; display: block; max-width: 100%; }
 
-        /* NEW: wrapped sequence style */
+        
         .seq-wrap{
             white-space: normal;
             overflow-wrap: anywhere;
@@ -545,40 +682,40 @@
             line-height: 1.3;
             display: inline;
         }
-        /* stacked, multi-line DNA blocks */
+        
         .seq-block{
             font-family: ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
             white-space: pre-wrap;
             word-break: break-word;
             line-height: 1.3;
-            display: block;            /* forces its own line like in the screenshot */
+            display: block;            
         }
 
 
-        /* long tokens in user messages (kept for compatibility if used elsewhere) */
+        
         .user-long-token { display: inline-block; max-width: 100%; white-space: nowrap; overflow-x: auto; vertical-align: bottom; }
 
         table {
-            table-layout: fixed;   /* prevent columns from expanding */
-            width: 100%;           /* force table to fit container */
+            table-layout: fixed;   
+            width: 100%;           
             border-collapse: collapse;
         }
 
-        /* make preview cells truncate nicely and show a pointer cursor on hover */
+        
         .truncate-cell {
           white-space: nowrap;
           overflow: hidden;
           text-overflow: ellipsis;
-          max-width: 420px;   /* adjust if you want wider cells */
+          max-width: 420px;  
         }
 
-        .truncate-cell.seq {  /* sequences look better monospace */
+        .truncate-cell.seq { 
           font-family: ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
           letter-spacing: .02em;
-          cursor: help;       /* indicates there's more info on hover */
+          cursor: help;       
         }
 
-        /* Accordion */
+        
         .accordion-header{
             display:flex;
             align-items:center;
@@ -635,8 +772,6 @@
                     <div id="uploaded-files-list">
                         <h4>Uploaded Files:</h4>
                         <div id="files-display"></div>
-                        <button id="previewBtn" class="btn" style="margin-top:10px;background:#0d6efd">
-                                Preview Selected</button>
                     </div>
                     
                 </div>
@@ -701,7 +836,7 @@
                 MicrobiomeBot is thinking...
             </div>
 
-            <!-- Explain Interaction UI -->
+            <!-- Explained Interaction UI -->
             <div id="edgeExplainUI" class="network-container accordion" style="margin-top:10px">
                 <div id="edgeExplainToggle" class="accordion-header" role="button" tabindex="0" aria-expanded="false">
                   <span>Explain an interaction</span>
@@ -759,9 +894,9 @@
             }
         }
 
-        // helper: wrap long DNA strings with <wbr> every 64 chars
+        
         function wrapLongDNA(text, chunk=64){
-            // works on already-HTML text (won't touch tags)
+            
             return text.replace(/([ACGTNacgtn]{60,})/g, (m) => {
                 return `<span class="seq-wrap">${m.replace(new RegExp(`(.{${chunk}})`, 'g'), '$1<wbr>')}</span>`;
             });
@@ -771,13 +906,13 @@
         function asStackedDNA(s, chunk=64){
             if (!s) return s;
             const isDNA = /^[ACGTNacgtn]+$/.test(s);
-            if (!isDNA || s.length <= chunk) return s;  // short or non-DNA: leave as-is
+            if (!isDNA || s.length <= chunk) return s;  
             const chunks = s.match(new RegExp(`.{1,${chunk}}`, 'g')) || [s];
-            // tooltip has full sequence; body shows stacked lines
+            
             return `<span class="seq-block" title="${s}">${chunks.join('<br>')}</span>`;
         }
 
-        // Find long DNA runs in an HTML string and replace them with the stacked block
+        
         function replaceLongDNAInHTML(html, chunk=64){
             return html.replace(/([ACGTNacgtn]{60,})/g, (m) => asStackedDNA(m, chunk));
         }
@@ -787,23 +922,23 @@
             const chatContainer = document.getElementById('chatContainer');
             const messageDiv = document.createElement('div');
 
-            // Determine if it's a user message or bot message
+            
             let isUser = false;
             let messageContent = '';
             let avatarText = '🤖';
             
             if (sender === '' || sender === '🤖') {
-                // Bot message
+                
                 isUser = false;
                 messageContent = content || sender;
                 avatarText = '🤖';
             } else if (typeof sender === 'string' && content) {
-                // New pattern: addMessage('🤖', 'message content')
+                
                 isUser = false;
                 messageContent = content;
                 avatarText = sender;
             } else {
-                // User message
+                
                 isUser = true;
                 messageContent = sender;
                 avatarText = '';
@@ -819,7 +954,7 @@
             contentDiv.className = 'message-content';
             
             if (isUser) {
-                // handle very long tokens; also wrap DNA with soft breaks
+                // handles very long tokens; also wrap DNA with soft breaks
                 const longTokenCheck   = /[^\s]{60,}/;
                 const longTokenReplace = /[^\s]{60,}/g;
 
@@ -834,7 +969,7 @@
                 const isVeryLong   = messageContent.length > 300 || messageContent.split('\n').length > 10;
 
                 if (hasLongToken) {
-                    // build HTML: escape everything except we inject <wbr> inside the long token(s)
+                   
                     let html = '';
                     let last = 0;
                     messageContent.replace(longTokenReplace, (match, offset) => {
@@ -855,12 +990,12 @@
                     contentDiv.textContent = messageContent;
                 }
             } else {
-                // Bot message: markdown-ish formatting first
+                
                 let formattedContent = messageContent
                     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
                     .replace(/\n/g, '<br>');
 
-                // Make long sequences wrap nicely
+               
                 formattedContent = formattedContent.replace(/`([ACGTNacgtn\s]+)`/g, (m, p1) => {
                     const wrapped = p1.replace(/(.{64})/g, '$1<wbr>');
                     return `<code class="seq-wrap">${wrapped}</code>`;
@@ -899,34 +1034,34 @@
             const message = input.value.trim();
             if (!message) return;
 
-            // handle: "compare selected csvs", "compare the selected csvs", "compare two selected csv"
+            
             const compareCmd = /^\s*compare(?:\s+(?:the|two))?(?:\s+selected)?(?:\s+csvs?)?\s*$/i;
             if (compareCmd.test(message)) {
-                // 1) show the user's question bubble
+                
                 addMessage(message);
 
-                // 2) clear input like normal
+                
                 input.value = '';
                 input.style.height = '50px';
 
-                // 3) optional status / typing
+                
                 updateStatus('Comparing…', '#ffc107');
-                // showTyping(); // uncomment if you want the typing dots
+                
 
                 try {
-                    // 4) run the compare (async)
+                    
                     await compareSelectedCSVs();
                 } finally {
                     updateStatus('Ready');
-                    // hideTyping(); // if you enabled showTyping above
+                    
                 }
-                return; // don't fall through to /chat
+                return; 
             }
 
             
             addMessage(message);
             input.value = '';
-            input.style.height = '50px'; // Reset textarea height
+            input.style.height = '50px'; 
             
             showTyping();
             updateStatus('Processing...', '#ffc107');
@@ -978,7 +1113,7 @@
             const depthFiles = [];
             const pdfFiles = [];
             
-            // Separate CSV, depth, and PDF files
+                
             for (let i = 0; i < files.length; i++) {
                 const file = files[i];
                 const name = (file.name || '').toLowerCase();
@@ -988,7 +1123,7 @@
                 else csvFiles.push(file);
             }
             
-            // Process depth files first
+            
             for (let i = 0; i < depthFiles.length; i++) {
                 const file = depthFiles[i];
                 addMessage('🤖', `📊 Processing depth file: ${file.name}`);
@@ -1007,7 +1142,7 @@
                 }
             }
             
-            // Process PDF files
+            
             if (pdfFiles.length > 0) {
                 if (pdfFiles.length === 1) {
                     const file = pdfFiles[0];
@@ -1038,7 +1173,7 @@
             }
             
             
-// Process CSV files for microbiome analysis
+            
 if (csvFiles.length > 0) {
     if (csvFiles.length === 1) {
         const file = csvFiles[0];
@@ -1191,14 +1326,13 @@ if (csvFiles.length > 0) {
                 
                 const plotData = JSON.parse(data.plot_json);
                 Plotly.newPlot(plotDiv, plotData.data, plotData.layout, {responsive:true});
-                // after Plotly.newPlot(plotDiv, plotData.data, plotData.layout, {responsive:true});
                 
                 plotDiv.on('plotly_click', (ev) => {
                     const pt = ev?.points?.[0];
                     const cd = pt?.customdata;
                     if (Array.isArray(cd) && cd.length >= 2) {
                         const s1 = cd[0], s2 = cd[1], label = cd[2] || 'Unknown';
-                        // reflect into UI inputs (nice for transparency)
+                        
                         openExplainPanel();
                         const a = document.getElementById('exSpecies1'); if (a) a.value = s1;
                         const b = document.getElementById('exSpecies2'); if (b) b.value = s2;
@@ -1361,7 +1495,7 @@ if (csvFiles.length > 0) {
             document.getElementById('chatContainer').scrollTop = document.getElementById('chatContainer').scrollHeight;
         }
 
-        // helper to programmatically open the Explain panel
+        
         function openExplainPanel(){
             const header  = document.getElementById('edgeExplainToggle');
             const content = document.getElementById('edgeExplainContent');
@@ -1426,6 +1560,34 @@ async function updateFilesList() {
         console.error('updateFilesList failed:', err);
     }
 }
+async function deleteSelectedCSVs() {
+    const checked = Array.from(document.querySelectorAll('.csv-checkbox:checked')).map(x => x.value);
+    if (checked.length === 0) {
+        addMessage('🤖', '⚠️ No CSVs selected. Please check one or more CSVs in the left panel, then say **delete selected csvs**.');
+        return;
+    }
+    
+    try {
+        const res = await fetch('/delete_csvs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filenames: checked })
+        });
+        const result = await res.json();
+        
+        if (result.success) {
+            addMessage('🤖', `✅ ${result.message}: ${result.deleted_files.join(', ')}`);
+            if (result.errors.length > 0) {
+                addMessage('🤖', `⚠️ Errors: ${result.errors.join(', ')}`);
+            }
+            await updateFilesList(); 
+        } else {
+            addMessage('🤖', `❌ Delete failed: ${result.error}`);
+        }
+    } catch (e) {
+        addMessage('🤖', `❌ Delete error: ${e.message}`);
+    }
+}
 
         async function refreshChatHistory() {
             try {
@@ -1458,7 +1620,7 @@ async function updateFilesList() {
 
 
     async function explainEdge(species1, species2, label) {
-        // Allow programmatic calls OR form-driven calls
+        
         if (!species1 || !species2) {
             species1 = (document.getElementById('exSpecies1')?.value || '').trim();
             species2 = (document.getElementById('exSpecies2')?.value || '').trim();
@@ -1495,8 +1657,7 @@ async function updateFilesList() {
     }
 
     function renderProofCard(container, species1, species2, label, data) {
-        // data.steps: array of strings
-        // data.evidence: { n_samples, median, counts, fractions, correlation, rule_texts }
+        
         const steps = (data.steps || []).map(s => `<li>${escapeHtml(s)}</li>`).join('');
 
         const ev = data.evidence || {};
@@ -1541,7 +1702,7 @@ async function updateFilesList() {
       </div>
     </details>
     `;
-    // After building the card:
+    
     container.innerHTML = replaceLongDNAInHTML(container.innerHTML);
     }
     
@@ -1550,7 +1711,7 @@ async function updateFilesList() {
         return String(s ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
     }
 
-    // Quick null test card
+    
     async function runNullTest() {
         const chat = document.getElementById('chatContainer');
         const card = document.createElement('div');
@@ -1585,14 +1746,155 @@ document.addEventListener("copy", (e) => {
   const node = selection.anchorNode;
   if (!node) return;
 
-  // Find nearest cell (th/td)
+  
   const cell = node.nodeType === 1 ? node : node.parentElement;
   if (cell && cell.dataset && cell.dataset.fullvalue) {
     e.clipboardData.setData("text/plain", cell.dataset.fullvalue);
-    e.preventDefault();  // stop default truncated copy
+    e.preventDefault();  
   }
 });
 
     </script>
+    <script>
+       
+        (function () {
+          const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+          const originalSendMessage = window.sendMessage;
+        
+          async function networkIsReady() {
+            try {
+              const r = await fetch('/network');
+              const j = await r.json();
+              return !!j && !!j.plot_json;
+            } catch (e) { return false; }
+          }
+        
+          async function ensureAnalyzedAndReady() {
+            
+            if (await networkIsReady()) return true;
+        
+            
+            const input = document.getElementById('dataFile');
+            if (input && input.files && input.files.length) {
+              addMessage('🤖','No analysis in memory — running “Upload & Analyze”…');
+              await uploadData(); 
+        
+              
+              for (let i = 0; i < 20; i++) {
+                if (await networkIsReady()) return true;
+                await sleep(1000);
+              }
+              addMessage('🤖','Analysis finished, but network is not ready yet. Try “show me network” again or check logs.');
+              return false;
+            }
+        
+            
+            addMessage('🤖','No analysis data available. Choose your CSV(s) in the left panel and click “Upload & Analyze”, then try again.');
+                return false;
+              }
+        
+        
+          
+          window.sendMessage = async function patchedSendMessage() {
+            const input = document.getElementById('messageInput');
+            const msg = (input.value || '').trim();
+            const low = msg.toLowerCase();
+        
+            // 2) show network (analyze if needed, then call the existing showNetwork again)
+            
+            const looksLikeFilter = /\bwith\b|[<>]=?|abundance|compression|top\s+\d+|filter/.test(low);
+            if (!looksLikeFilter && /(show|plot|display|generate).*\bnetworks?\b/.test(low)) {
+              addMessage(msg); input.value = ''; input.style.height = '50px';
+              if (await ensureAnalyzedAndReady()) { await showNetwork(); }
+              return;
+            }
+        
+            // 3) depth qc shortcut
+            if (/(depth|qc|rarefaction)/.test(low)) {
+              addMessage(msg); input.value = ''; input.style.height = '50px';
+              await showDepth();
+              return;
+            }
+        
+            
+            return originalSendMessage();
+          };
+        })();
+        </script>
+        <script>
+            
+            (function () {
+              
+              function getAllFileCheckboxes() {
+                return Array.from(document.querySelectorAll('#files-display .csv-checkbox'));
+              }
+              function deselectAllFiles() {
+                getAllFileCheckboxes().forEach(b => { b.checked = false; });
+              }
+              function selectFileByName(name) {
+                let hit = false;
+                getAllFileCheckboxes().forEach(b => {
+                  const text = (b.closest('label')?.innerText || '').trim();
+                  if (text.toLowerCase().includes(name.toLowerCase())) { b.checked = true; hit = true; }
+                });
+                return hit;
+              }
+              async function previewNow() {
+                try { await previewSelectedCSVs(); } catch (e) { addMessage('🤖', 'Preview failed: ' + e.message); }
+              }
+            
+              
+              (function waitAndPatch(){
+                if (typeof window.sendMessage !== 'function') { setTimeout(waitAndPatch, 50); return; }
+                const originalSendMessage = window.sendMessage;
+            
+                window.sendMessage = async function patchedSendMessage () {
+                  const input = document.getElementById('messageInput');
+                  const msg = (input.value || '').trim();
+                  const low = msg.toLowerCase();
+            
+                  // 1) Deselects all
+                  if (/^(deselect all|clear selection|unselect all|deselect csvs|deselect all csvs|deselect csv)$/i.test(msg)) {
+                    addMessage(msg);
+                    deselectAllFiles();
+                    input.value = ''; input.style.height = '50px';
+                    addMessage('🤖','Deselected all CSVs.');
+                    return;
+                  }
+            
+                  // 2) preview <file>.csv  → select, then call previewSelectedCSVs()
+                  const m = msg.match(/^\s*preview\s+([\w\-.]+\.csv)\s*$/i);
+                  if (m) {
+                    addMessage(msg);
+                    input.value = ''; input.style.height = '50px';
+                    const ok = selectFileByName(m[1]);
+                    if (!ok) { addMessage('🤖', `Couldn’t find ${m[1]} in the list.`); return; }
+                    await previewNow();
+                    return;
+                  }
+            
+                  // 3) preview selected
+                  if (/^\s*preview\s+(selected|selected\s+csvs?)\s*$/i.test(low)) {
+                    addMessage(msg);
+                    input.value = ''; input.style.height = '50px';
+                    await previewNow();
+                    return;
+                  }
+
+                  // 4) delete selected csvs
+                  if (/(delete|remove).*(selected|checked)?\s*(csv|csvs?)/.test(low)) {
+                    addMessage(msg); 
+                    input.value = ''; 
+                    input.style.height = '50px';
+                    await deleteSelectedCSVs();
+                    return;
+                  }
+            
+                  
+                  return originalSendMessage();
+                };
+              })();
+            })();
+            </script>
 </body>
 </html>

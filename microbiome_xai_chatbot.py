@@ -1,10 +1,10 @@
 import os
 import json
 import numpy as np
+import difflib
 import pandas as pd
-from flask import Flask, render_template, request, jsonify, send_from_directory
+from flask import Flask, render_template, request, jsonify
 import subprocess
-import tempfile
 import networkx as nx
 import plotly.graph_objects as go
 import plotly.express as px
@@ -14,18 +14,149 @@ from typing import Dict, List, Tuple, Any
 import signal
 import sys
 import PyPDF2
-import fitz  # PyMuPDF for better PDF extraction
+import fitz  
 from werkzeug.utils import secure_filename
 
 # Enable automatic conversion between pandas and R
-# pandas2ri.activate()
-# numpy2ri.activate()
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret")
 
-DEPTH_CSV_DEFAULT = os.environ.get("DEPTH_CSV", "/mnt/data/depth.csv")
+DEPTH_CSV_DEFAULT = os.environ.get("DEPTH_CSV", os.path.join("data","depth.csv"))
 
 class MicrobiomeXAIChatbot:
+    def _suggest_closest_taxa(self, df, column, name, max_suggestions=5):
+        """Return a 'Did you mean' string using difflib if close matches exist."""
+        try:
+            vals = [str(v) for v in df[column].dropna().unique() if str(v).strip()]
+            matches = difflib.get_close_matches(name, vals, n=max_suggestions, cutoff=0.6)
+            if matches:
+                return " Did you mean: " + ", ".join(matches) + "?"
+        except Exception:
+            pass
+        return ""
+
+    def _load_csv_from_known_locations(self, name_hint):
+        """Try to find a CSV by name in uploaded files or self.data_dir."""
+        # To look in uploaded files first
+        for fname, info in self.uploaded_files.get('csv_files', {}).items():
+            if name_hint.lower() in fname.lower():
+                return info.get('data'), fname
+        # To look in data directory
+        roots = [getattr(self, 'data_dir', 'data'), '.']
+        for root in roots:
+            try:
+                for fn in os.listdir(root):
+                    if fn.lower().endswith('.csv') and name_hint.lower() in fn.lower():
+                        try:
+                            return pd.read_csv(os.path.join(root, fn)), fn
+                        except Exception:
+                            continue
+            except Exception:
+                continue
+        return None, None
+
+    def compare_interactions(self, a_df, b_df):
+        """Return overlap/changes between two interaction tables (columns sp1, sp2, lnk optionally)."""
+        def norm(df):
+            df = df.copy()
+            if 'sp1' not in df.columns or 'sp2' not in df.columns:
+                rename_map = {}
+                if 'species1' in df.columns: rename_map['species1'] = 'sp1'
+                if 'species2' in df.columns: rename_map['species2'] = 'sp2'
+                if 'interaction' in df.columns and 'lnk' not in df.columns: rename_map['interaction'] = 'lnk'
+                df = df.rename(columns=rename_map)
+            if 'lnk' not in df.columns: df['lnk'] = 'unknown'
+            undir = set(tuple(sorted((str(r['sp1']), str(r['sp2'])))) for _, r in df.iterrows())
+            return df, undir
+
+        A, A_undir = norm(a_df)
+        B, B_undir = norm(b_df)
+
+        overlap_edges = A_undir & B_undir
+        added_edges = B_undir - A_undir
+        removed_edges = A_undir - B_undir
+
+        def labels_for(df):
+            d = {}
+            for _, r in df.iterrows():
+                key = tuple(sorted((str(r.get('sp1','')), str(r.get('sp2','')))))
+                d.setdefault(key, set()).add(str(r.get('lnk','unknown')))
+            return d
+
+        labA = labels_for(A)
+        labB = labels_for(B)
+        changed = {k: {'a': sorted(labA.get(k, [])), 'b': sorted(labB.get(k, []))}
+                   for k in overlap_edges if labA.get(k, set()) != labB.get(k, set())}
+
+        union = A_undir | B_undir
+        jaccard = (len(overlap_edges) / len(union)) if union else 0.0
+
+        return {
+            'a_edges': len(A_undir),
+            'b_edges': len(B_undir),
+            'overlap_edges': len(overlap_edges),
+            'jaccard': jaccard,
+            'added_examples': list(sorted(list(added_edges)))[:20],
+            'removed_examples': list(sorted(list(removed_edges)))[:20],
+            'label_changes': changed
+        }
+
+    def compare_taxonomy(self, a_df, b_df):
+        """Compare two taxonomy tables by parent->child pairs for adjacent levels."""
+        cols = [c for c in a_df.columns if c in b_df.columns]
+        cols = [c for c in cols if c.lower() in ['kingdom','phylum','class','order','family','genus','species']]
+        if len(cols) < 2:
+            return {'error': 'Taxonomy files need at least two common taxonomic columns to compare.'}
+        def pairs(df, parent, child):
+            df = df.dropna(subset=[parent, child]).copy()
+            df[parent] = df[parent].astype(str).str.strip()
+            df[child]  = df[child].astype(str).str.strip()
+            return set(tuple(x) for x in df[[parent, child]].drop_duplicates().values.tolist())
+        results = {'columns_compared': cols, 'levels': []}
+        for i in range(len(cols)-1):
+            parent, child = cols[i], cols[i+1]
+            a_pairs = pairs(a_df, parent, child)
+            b_pairs = pairs(b_df, parent, child)
+            overlap = a_pairs & b_pairs
+            union = a_pairs | b_pairs
+            results['levels'].append({
+                'relation': f'{parent}->{child}',
+                'a_pairs': len(a_pairs),
+                'b_pairs': len(b_pairs),
+                'overlap': len(overlap),
+                'jaccard': (len(overlap)/len(union) if union else 0.0),
+                'added_examples': list(sorted(list(b_pairs - a_pairs)))[:20],
+                'removed_examples': list(sorted(list(a_pairs - b_pairs)))[:20],
+            })
+        return results
+
+    def compare_mappings(self, a_df, b_df):
+        """Compare two species mapping tables by unique_name/species_name coverage and overlap."""
+        def keyset(df):
+            key = None
+            for cand in ['unique_name','species_name']:
+                if cand in df.columns:
+                    key = cand
+                    break
+            if not key:
+                return set(), None
+            vals = set(str(v).strip() for v in df[key].dropna().unique())
+            return vals, key
+        a_keys, a_col = keyset(a_df)
+        b_keys, b_col = keyset(b_df)
+        if a_col is None or b_col is None:
+            return {'error': 'Both mapping files need a unique_name or species_name column.'}
+        union = a_keys | b_keys
+        return {
+            'a_keys': len(a_keys),
+            'b_keys': len(b_keys),
+            'overlap': len(a_keys & b_keys),
+            'jaccard': (len(a_keys & b_keys)/len(union) if union else 0.0),
+            'only_in_a': list(sorted(list(a_keys - b_keys)))[:20],
+            'only_in_b': list(sorted(list(b_keys - a_keys)))[:20],
+        }
+
     def __init__(self):
         """Initialize the XAI chatbot with R integration"""
         self.setup_r_environment()
@@ -42,7 +173,7 @@ class MicrobiomeXAIChatbot:
             'csv_files': {},
             'pdf_files': {}
         }
-        self.allowed_extensions = {'csv', 'pdf'}
+        self.allowed_extensions = {'csv','tsv','txt','pdf'}
         self.upload_dir = 'uploads'
         os.makedirs(self.upload_dir, exist_ok=True)
         
@@ -53,8 +184,8 @@ class MicrobiomeXAIChatbot:
             r"C:\Program Files\R\R-*\bin\x64\R.exe", 
             r"C:\Program Files (x86)\R\R-*\bin\R.exe",
             r"C:\Program Files (x86)\R\R-*\bin\x64\R.exe",
-            "R.exe",  # If in PATH
-            "R"       # Unix-style
+            "R.exe", 
+            "R"       
         ]
         
         import glob
@@ -62,7 +193,7 @@ class MicrobiomeXAIChatbot:
             if '*' in pattern:
                 matches = glob.glob(pattern)
                 if matches:
-                    # Get the latest version
+                    
                     return max(matches)
             else:
                 try:
@@ -87,7 +218,7 @@ class MicrobiomeXAIChatbot:
             
             print(f"Found R at: {self.r_executable}")
             
-            # Test if R is working
+            # Tests if R is working
             result = subprocess.run([self.r_executable, '--version'], 
                                   capture_output=True, text=True, timeout=10)
             if result.returncode != 0:
@@ -312,12 +443,12 @@ class MicrobiomeXAIChatbot:
             return {"error": "InfIntE package not available"}
         
         try:
-            # Preprocess the data to handle missing values and ensure proper format
+            # For Preprocess the data to handle missing values and ensure proper format
             processed_data = self.preprocess_otu_data(otu_data)
             if isinstance(processed_data, dict) and 'error' in processed_data:
                 return processed_data
             
-            # Create R script for analysis with optimized parameters using unique temp files
+            # Creating R script for analysis with optimized parameters using unique temp files
             input_path = os.path.join(os.getcwd(), 'input.csv')
             processed_data.to_csv(input_path, index=True)
             
@@ -330,12 +461,12 @@ class MicrobiomeXAIChatbot:
             else:
                 ncores = min(6, os.cpu_count() or 1)  # Unix/Linux systems
             
-            # Get optimized nperms from preprocessing if available, otherwise use default
+            # Get optimized nperms from preprocessing 
             nperms = getattr(processed_data, '_nperms', 10)
             
             depth_str = ', '.join(map(str, depth)) if depth else ''
             
-            # Convert paths to forward slashes for R compatibility
+            # Converted paths to forward slashes for R compatibility
             input_path_r = input_path.replace('\\', '/')
             interactions_output_r = interactions_output.replace('\\', '/')
             interactions_enhanced_output_r = interactions_enhanced_output.replace('\\', '/')
@@ -392,11 +523,27 @@ class MicrobiomeXAIChatbot:
             
             # Execute R script with extended timeout for large datasets
             print(f"Running R analysis with timeout of {timeout_seconds} seconds...")
+
             result = subprocess.run([self.r_executable, '--slave', '-f', 'script.R'], 
-                                  capture_output=True, text=True, timeout=timeout_seconds, cwd=os.getcwd())  # Increased timeout
-            
+            capture_output=True, text=True, timeout=timeout_seconds, cwd=os.getcwd()
+            )
+        
+            # Better error analysis
             if result.returncode != 0:
-                return {"error": f"R analysis failed: {result.stderr}"}
+                error_msg = result.stderr.strip()
+            
+                # Categorizes common errors
+                if "InfIntE" in error_msg:
+                    return {"error": "InfIntE package error. Please ensure InfIntE is properly installed in R."}
+                elif "Python3" in error_msg or "python" in error_msg.lower():
+                    return {"error": "Python dependency issue. Please install numpy, texttable, and cython for PyGol."}
+                elif "memory" in error_msg.lower() or "cannot allocate" in error_msg.lower():
+                    return {"error": f"Memory error. Dataset too large ({original_rows}x{original_cols}). Try reducing dataset size."}
+                elif "timeout" in error_msg.lower():
+                    return {"error": f"Analysis timed out after {timeout_seconds//60} minutes. Try with a smaller dataset."}
+                else:
+                    return {"error": f"R analysis failed: {error_msg[:200]}..."}
+        
             
             # Read results from unique interactions file
             interactions_file = os.path.join(os.getcwd(), 'interactions.csv')
@@ -429,6 +576,10 @@ class MicrobiomeXAIChatbot:
                     
         except subprocess.TimeoutExpired:
             return {"error": f"Analysis timed out after {timeout_seconds//60} minutes"}
+        except FileNotFoundError:
+            return {"error": "R executable not found. Please install R and add it to PATH."}
+        except PermissionError:
+            return {"error": "Permission denied accessing R or temp executable. Please check file permissions."}
         except Exception as e:
             return {"error": f"Analysis failed: {str(e)}"}
     
@@ -450,7 +601,7 @@ class MicrobiomeXAIChatbot:
                 skip_cleaning = False
             
             # Handle different CSV formats more flexibly
-            # If first column looks like sample names/IDs and has unique values, use it as index
+            # If first column looks like sample names/IDs and has unique values, uses it as index
             first_col = processed_data.columns[0]
             if (processed_data[first_col].dtype == 'object' and 
                 processed_data[first_col].nunique() == len(processed_data) and
@@ -458,14 +609,14 @@ class MicrobiomeXAIChatbot:
                 processed_data = processed_data.set_index(first_col)
             
             # Remove completely empty rows and columns
-            processed_data = processed_data.dropna(how='all', axis=0)  # Remove empty rows
-            processed_data = processed_data.dropna(how='all', axis=1)  # Remove empty columns
+            processed_data = processed_data.dropna(how='all', axis=0)  # For Removing empty rows
+            processed_data = processed_data.dropna(how='all', axis=1)  # For Removing empty columns
             
             # Check if we still have data after removing empty rows/columns
             if processed_data.empty:
                 return {"error": "Dataset contains only empty values"}
             
-            # Handle missing values by filling with 0 (common practice for abundance data)
+            # Handle missing values by filling with 0 (common practice we should do for abundance data)
             processed_data = processed_data.fillna(0)
             
             # Try to convert columns to numeric, but be flexible with mixed data types
@@ -537,13 +688,12 @@ class MicrobiomeXAIChatbot:
                 return {"error": "No valid data columns found after preprocessing"}
             
             # For interaction analysis, we need at least 2 features and 2 samples
-            # But be more flexible about the requirements
             if processed_data.shape[0] < 2 and processed_data.shape[1] >= 2:
                 # If we have few rows but multiple columns, transpose the data
                 # This handles cases where features are in columns instead of rows
                 processed_data = processed_data.T
             
-            # Very lenient validation - just ensure we have some data structure
+            # Very lenient validation - just ensure to have some data structure
             if processed_data.shape[0] < 1:
                 return {"error": "Need at least 1 feature (row) for analysis"}
             
@@ -634,6 +784,16 @@ class MicrobiomeXAIChatbot:
             return {"error": f"Data preprocessing failed: {str(e)}"}
     
     def explain_interaction(self, species1: str, species2: str) -> str:
+        val1 = self.validate_species_name(species1)
+        val2 = self.validate_species_name(species2)
+        if not val1.get("valid"):
+            return f"Invalid species 1: {val1.get('error','Unknown error')}"
+        if not val2.get("valid"):
+            return f"Invalid species 2: {val2.get('error','Unknown error')}"
+        # Use possibly normalized names
+        species1 = val1.get("species_name", species1)
+        species2 = val2.get("species_name", species2)
+
         """Provide detailed explanation of interaction between two species"""
         if not self.current_analysis:
             return "No analysis data available. Please run an analysis first."
@@ -672,6 +832,217 @@ This interaction was inferred through abductive reasoning using PyGol. The syste
         """
         
         return explanation.strip()
+
+    def _get_series_for_species(self, df, species):
+        """Find species vector in rows or columns; return (values as float Series, axis_name)."""
+        if species in df.index:
+            s = df.loc[species].astype(float)
+            return s, 'rows'
+        if species in df.columns:
+            s = df[species].astype(float)
+            return s, 'cols'
+        return None, None
+
+    def _spearman_fast(self, x, y):
+        """Spearman via rank+pearson (no scipy)."""
+        xr = x.rank(method='average')
+        yr = y.rank(method='average')
+        return xr.corr(yr)
+
+    def _binary_high_low(self, s):
+        """Return boolean series of 'high' (>= median) and 'low' (< median)."""
+        med = float(s.median())
+        return (s >= med), (s < med), med
+
+    def validate_species_name(self, species_name):
+        """Validate and suggest corrections for species names"""
+        if not species_name or not isinstance(species_name, str):
+            return {"valid": False, "error": "Species name must be a non-empty string"}
+    
+        species_name = species_name.strip()
+        if len(species_name) < 2:
+            return {"valid": False, "error": "Species name too short"}
+    
+        # Check if species exists in current data
+        if hasattr(self, 'current_analysis') and self.current_analysis:
+            otu_data = self.current_analysis.get('otu_data')
+            if otu_data is not None:
+                # Check in both rows and columns
+                available_species = list(otu_data.index) + list(otu_data.columns)
+                if species_name not in available_species:
+                    # Use existing suggestion method
+                    suggestion = self._suggest_closest_taxa(
+                        pd.DataFrame(index=available_species), 'index', species_name
+                    )
+                    return {
+                        "valid": False, 
+                        "error": f"Species '{species_name}' not found in dataset.{suggestion}",
+                        "suggestions": suggestion
+                    }
+    
+        return {"valid": True, "species_name": species_name}
+
+    def infer_rule_evidence(self, species1, species2, high_thresh=0.7):
+        """
+        Build simple, human-readable rule evidence between two species from the OTU table.
+        Returns dict with counts, correlations, rule_texts.
+        """
+        if not self.current_analysis or 'otu_data' not in self.current_analysis:
+            return {'error': 'No OTU data available.'}
+
+        df = self.current_analysis['otu_data']
+        s1, ax1 = self._get_series_for_species(df, species1)
+        s2, ax2 = self._get_series_for_species(df, species2)
+        if s1 is None or s2 is None:
+            # Try fuzzy suggestion if available
+            hint = ''
+            if hasattr(self, '_suggest_closest_taxa'):
+                if s1 is None: hint += self._suggest_closest_taxa(df, df.index.name or 'index', species1)
+                if s2 is None: hint += self._suggest_closest_taxa(df, df.index.name or 'index', species2)
+            return {'error': f'Species not found in table. {hint}'.strip()}
+
+        # align on common sample index
+        s1, s2 = s1.align(s2, join='inner')
+        if len(s1) < 3:
+            return {'error': 'Not enough overlapping samples.'}
+
+        # core stats
+        spearman = float(self._spearman_fast(s1, s2))
+        pearson  = float(s1.corr(s2))
+        n = int(len(s1))
+
+        # high/low evidence
+        s1_hi, s1_lo, m1 = self._binary_high_low(s1)
+        s2_hi, s2_lo, m2 = self._binary_high_low(s2)
+
+        both_hi = int((s1_hi & s2_hi).sum())
+        both_lo = int((s1_lo & s2_lo).sum())
+        opp_hilo = int((s1_hi & s2_lo).sum())
+        opp_lohi = int((s1_lo & s2_hi).sum())
+        concordant = both_hi + both_lo
+        discordant = opp_hilo + opp_lohi
+
+        frac_conc = concordant / n
+        frac_disc = discordant / n
+
+        rule_texts = []
+        if frac_conc >= high_thresh:
+            rule_texts.append(
+                f"If {species1} and {species2} are both high (≥ median) or both low in ≥{int(high_thresh*100)}% of samples "
+                f"→ supports MUTUALISM/positive association (concordant={concordant}/{n})."
+            )
+        if frac_disc >= high_thresh:
+            rule_texts.append(
+                f"If {species1} is high when {species2} is low (or vice versa) in ≥{int(high_thresh*100)}% of samples "
+                f"→ supports COMPETITION/negative association (discordant={discordant}/{n})."
+            )
+        if not rule_texts:
+
+            rule_texts.append(
+                f"Concordant={concordant}/{n} ({frac_conc:.2f}), Discordant={discordant}/{n} ({frac_disc:.2f}); "
+                f"Spearman={spearman:.2f}, Pearson={pearson:.2f}."
+            )
+
+        return {
+            'n_samples': n,
+            'median': {species1: m1, species2: m2},
+            'counts': {'both_high': both_hi, 'both_low': both_lo, 'hi_low': opp_hilo, 'low_hi': opp_lohi},
+            'fractions': {'concordant': round(frac_conc, 3), 'discordant': round(frac_disc, 3)},
+            'correlation': {'spearman': round(spearman, 3), 'pearson': round(pearson, 3)},
+            'rule_texts': rule_texts
+        }
+
+    def proof_trace_for_interaction(self, species1, species2, inferred_type):
+        """Produce a simple step-wise reasoning trace for UI/report."""
+        ev = self.infer_rule_evidence(species1, species2)
+        if 'error' in ev: return {'error': ev['error']}
+
+        steps = []
+        steps.append(f"1) Compute medians: {species1}={ev['median'][species1]:.3g}, {species2}={ev['median'][species2]:.3g}.")
+        steps.append("2) Binarize each sample as High (≥ median) or Low (< median).")
+        c = ev['counts']
+        steps.append(f"3) Count patterns across {ev['n_samples']} samples: "
+                 f"both-high={c['both_high']}, both-low={c['both_low']}, hi-low={c['hi_low']}, low-hi={c['low_hi']}.")
+        steps.append(f"4) Concordant fraction={ev['fractions']['concordant']}, discordant={ev['fractions']['discordant']}; "
+                 f"Spearman={ev['correlation']['spearman']}, Pearson={ev['correlation']['pearson']}.")
+        if inferred_type.lower().startswith('mutual'):
+            steps.append("5) Rule: high concordance → supports Mutualism/positive association.")
+        elif inferred_type.lower().startswith('comp'):
+            steps.append("5) Rule: high discordance → supports Competition/negative association.")
+        else:
+            steps.append("5) Rule: mixed patterns; label may stem from higher-order logic in R.")
+        steps.append(f"6) Conclusion: supports '{inferred_type}' between {species1} and {species2}.")
+        return {'steps': steps, 'evidence': ev}
+
+    def network_null_significance(self, num_draws=200, random_state=42):
+        """
+        Show that inferred edges are not random by comparing mean |Spearman| on inferred pairs
+        vs random pairs drawn from the same OTU table. Returns z-score and permutation p-value.
+        """
+        if not self.current_analysis or 'otu_data' not in self.current_analysis or 'interactions' not in self.current_analysis:
+            return {'error': 'Need otu_data and interactions in memory.'}
+
+        df = self.current_analysis['otu_data']
+        inter = self.current_analysis['interactions']
+        rng = np.random.default_rng(random_state)
+
+        # Get species-axis names and vector access
+        def get_vec(name):
+            if name in df.index:  return df.loc[name].astype(float)
+            if name in df.columns: return df[name].astype(float)
+            return None
+
+        # observed statistic: mean |Spearman| over inferred edges we actually have data for
+        obs_vals = []
+        for _, r in inter.iterrows():
+            s1, s2 = str(r['sp1']), str(r['sp2'])
+            v1, v2 = get_vec(s1), get_vec(s2)
+            if v1 is None or v2 is None: continue
+            v1, v2 = v1.align(v2, join='inner')
+            if len(v1) >= 3:
+                obs_vals.append(abs(self._spearman_fast(v1, v2)))
+        if not obs_vals:
+            return {'error': 'No overlapping species vectors for null test.'}
+        obs = float(np.mean(obs_vals))
+
+        # build random pairs from the same species pool
+        species_pool = list(df.index if df.index.size >= df.columns.size else df.columns)
+        species_pool = [str(s) for s in species_pool]
+        num_pairs = len(obs_vals)
+
+        null_stats = []
+        for _ in range(num_draws):
+            pairs = rng.choice(species_pool, size=(num_pairs, 2), replace=True)
+            vals = []
+            for a, b in pairs:
+                va, vb = get_vec(a), get_vec(b)
+                if va is None or vb is None: 
+                    print(f"Warning: Missing data for species pair ({a}, {b})")
+                    continue
+                va, vb = va.align(vb, join='inner')
+                if len(va) >= 3:
+                    vals.append(abs(self._spearman_fast(va, vb)))
+            if vals:
+                null_stats.append(float(np.mean(vals)))
+
+        if not null_stats:
+            return {'error': 'Null distribution empty (species coverage issue).'}
+
+        null_mean = float(np.mean(null_stats))
+        null_std  = float(np.std(null_stats, ddof=1)) if len(null_stats) > 1 else 0.0
+        z = (obs - null_mean) / (null_std + 1e-9)
+        p = float((np.sum(np.array(null_stats) >= obs) + 1) / (len(null_stats) + 1))  # permutation p 
+
+        return {
+            'observed_mean_abs_spearman': round(obs, 3),
+            'null_mean': round(null_mean, 3),
+            'null_std': round(null_std, 3),
+            'z_score': round(z, 3),
+            'permutation_p_upper': round(p, 4),
+            'num_inferred_pairs_tested': int(num_pairs),
+            'num_null_draws': int(num_draws)
+        }
+
     
     def explain_analysis_process(self) -> str:
         """Explain the InfIntE analysis process step by step"""
@@ -717,6 +1088,10 @@ This interaction was inferred through abductive reasoning using PyGol. The syste
             return {"error": "No analysis data available"}
         
         interactions = self.current_analysis['interactions']
+        required_cols = {'sp1', 'sp2', 'lnk', 'comp'}
+        missing = required_cols - set(map(str, interactions.columns))
+        if missing:
+            return {"error": f"Interactions frame missing columns: {', '.join(sorted(missing))}"}
         
         # Create NetworkX graph
         G = nx.from_pandas_edgelist(
@@ -726,6 +1101,8 @@ This interaction was inferred through abductive reasoning using PyGol. The syste
             edge_attr=['lnk', 'comp'],
             create_using=nx.DiGraph()
         )
+        if G.number_of_nodes() == 0 or G.number_of_edges() == 0:
+            return {"error": "No nodes/edges to plot."}
         
         # Get node positions with better spacing
         pos = nx.spring_layout(G, k=2, iterations=100, seed=42)
@@ -743,55 +1120,55 @@ This interaction was inferred through abductive reasoning using PyGol. The syste
             'disappearance': '#ff44ff'
         }
         
-        # Prepare edge data with colors and better hover info
-        edge_x = []
-        edge_y = []
-        edge_colors = []
-        edge_info = []
-        
-        for edge in G.edges():
-            x0, y0 = pos[edge[0]]
-            x1, y1 = pos[edge[1]]
-            edge_x.extend([x0, x1, None])
-            edge_y.extend([y0, y1, None])
-            
-            edge_data = G.edges[edge]
-            interaction_type = edge_data.get('lnk', 'unknown')
-            compression = edge_data.get('comp', 'N/A')
-            
-            # Get color for interaction type
-            color = interaction_colors.get(interaction_type, '#888888')
-            edge_colors.extend([color, color, None])
-            
-            edge_info.append(f"<b>{edge[0]} → {edge[1]}</b><br>Type: {interaction_type}<br>Compression: {compression}")
-        
         # Create edge traces by interaction type for legend
         edge_traces = []
-        unique_interactions = interactions['lnk'].unique()
         
-        for interaction_type in unique_interactions:
+        for interaction_type in [t for t in interactions['lnk'].dropna().unique()]:
             type_edges = interactions[interactions['lnk'] == interaction_type]
             type_x = []
             type_y = []
+            hovertexts = []
+            cds = []
             
             for _, row in type_edges.iterrows():
-                if row['sp1'] in pos and row['sp2'] in pos:
-                    x0, y0 = pos[row['sp1']]
-                    x1, y1 = pos[row['sp2']]
-                    type_x.extend([x0, x1, None])
-                    type_y.extend([y0, y1, None])
+                s1, s2 = row['sp1'], row['sp2']
+                if s1 not in pos or s2 not in pos:
+                    continue
+                x0, y0 = pos[s1]
+                x1, y1 = pos[s2]
+                type_x.extend([x0, x1, None])
+                type_y.extend([y0, y1, None])
+                comp_val = row['comp']
+                try:
+                    comp_txt = f"{float(comp_val):.3f}"
+                except Exception:
+                    comp_txt = str(comp_val)
+
+                # one hover text per segment endpoint (Plotly expects per-point)
+                ht = f"{s1} → {s2} ({interaction_type}, comp={comp_txt})"
+                hovertexts.extend([ht, ht, None])
+
+                # customdata per point (so clicks carry [sp1,sp2,lnk])
+                cd = [s1, s2, interaction_type]
+                cds.extend([cd, cd, None])
+
+            if not type_x:
+                continue
             
-            edge_trace = go.Scatter(
-                x=type_x, y=type_y,
-                line=dict(width=3, color=interaction_colors.get(interaction_type, '#888888')),
-                hoverinfo='none',
-                mode='lines',
-                name=f'{interaction_type} ({len(type_edges)})',
-                showlegend=True
-            )
-            edge_traces.append(edge_trace)
+            edge_traces.append(
+                go.Scatter(
+                    x=type_x, y=type_y,
+                    line=dict(width=3, color=interaction_colors.get(interaction_type, '#888888')),
+                    hoverinfo='text',
+                    mode='lines',
+                    hovertext=hovertexts,
+                    customdata=cds,
+                    name=f"{interaction_type} ({len(type_edges)})",
+                    showlegend=True
+                ))
+            
         
-        # Create node trace with better styling
+        # This creates node trace with better styling
         node_x = []
         node_y = []
         node_text = []
@@ -799,26 +1176,25 @@ This interaction was inferred through abductive reasoning using PyGol. The syste
         node_sizes = []
         
         for node in G.nodes():
+            if node not in pos:
+                continue
             x, y = pos[node]
             node_x.append(x)
             node_y.append(y)
             
             # Use actual species name (truncate if too long)
-            display_name = str(node)
-            if len(display_name) > 15:
-                display_name = display_name[:12] + "..."
-            node_text.append(display_name)
-            
-            # Calculate node metrics
-            in_degree = G.in_degree(node)
-            out_degree = G.out_degree(node)
-            total_degree = in_degree + out_degree
-            
-            # Size nodes based on degree
-            node_size = max(20, min(50, 20 + total_degree * 3))
-            node_sizes.append(node_size)
-            
-            node_info.append(f"<b>Species: {node}</b><br>Incoming interactions: {in_degree}<br>Outgoing interactions: {out_degree}<br>Total degree: {total_degree}")
+            label = str(node)
+            node_text.append(label if len(label) <= 15 else label[:12] + "…")
+
+            indeg = G.in_degree(node)
+            outdeg = G.out_degree(node)
+            total = indeg + outdeg
+            node_sizes.append(max(20, min(50, 20 + total * 3)))
+
+            node_info.append(
+                f"<b>Species: {node}</b><br>"
+                f"Incoming: {indeg}<br>Outgoing: {outdeg}<br>Total degree: {total}"
+            )
         
         node_trace = go.Scatter(
             x=node_x, y=node_y,
@@ -838,7 +1214,7 @@ This interaction was inferred through abductive reasoning using PyGol. The syste
             showlegend=True
         )
         
-        # Create figure with better layout
+        # To Create figure with better layout
         fig = go.Figure(data=edge_traces + [node_trace],
                        layout=go.Layout(
                            title=dict(
@@ -850,7 +1226,7 @@ This interaction was inferred through abductive reasoning using PyGol. The syste
                            hovermode='closest',
                            margin=dict(b=20,l=5,r=5,t=60),
                            annotations=[ dict(
-                               text="Hover over nodes and edges for details. Node size indicates interaction degree.",
+                               text="Hover over nodes for details and explanation of interaction.",
                                showarrow=False,
                                xref="paper", yref="paper",
                                x=0.005, y=-0.002,
@@ -883,12 +1259,85 @@ This interaction was inferred through abductive reasoning using PyGol. The syste
     def process_user_query(self, query: str) -> str:
         """Process user query and return appropriate response"""
         query_lower = query.lower().strip()
+        # Quick history access via chat (natural language)
+        
+        # Dataset comparison via chat (e.g., 'compare interactions_enhanced vs interactions_short')
+        if 'compare' in query_lower:
+            def _pick_two(hintA, hintB):
+                a_df, a_name = self._load_csv_from_known_locations(hintA)
+                b_df, b_name = self._load_csv_from_known_locations(hintB)
+                return a_df, a_name, b_df, b_name
+
+            if 'interaction' in query_lower:
+                # parse specific names if provided around 'vs'
+                a_hint, b_hint = 'interactions_enhanced', 'interactions_short'
+                if ' vs ' in query_lower:
+                    parts = [p.strip() for p in query_lower.split(' vs ')]
+                    if len(parts) == 2:
+                        # try to extract filename-like tokens
+                        a_hint = parts[0].replace('compare', '').strip() or a_hint
+                        b_hint = parts[1].strip() or b_hint
+                a_df, a_name, b_df, b_name = _pick_two(a_hint, b_hint)
+                if a_df is None or b_df is None:
+                    return f"Couldn't find both interaction tables ('{a_hint}' and '{b_hint}'). Try uploading them first."
+                res = self.compare_interactions(a_df, b_df)
+                txt = [
+                    f"📊 Interaction tables compared: **{a_name}** vs **{b_name}**",
+                    f"- Edges: {res['a_edges']} vs {res['b_edges']}",
+                    f"- Overlap: {res['overlap_edges']} | Jaccard={res['jaccard']:.3f}",
+                ]
+                if res['added_examples']:
+                    ex = ', '.join([f"{x[0]}—{x[1]}" for x in res['added_examples'][:5]])
+                    txt.append(f"- Examples only in {b_name}: {ex} ...")
+                if res['removed_examples']:
+                    ex = ', '.join([f"{x[0]}—{x[1]}" for x in res['removed_examples'][:5]])
+                    txt.append(f"- Examples only in {a_name}: {ex} ...")
+                if res['label_changes']:
+                    k = next(iter(res['label_changes'].keys()))
+                    ch = res['label_changes'][k]
+                    txt.append(f"- Label change example {k[0]}—{k[1]}: {ch['a']} → {ch['b']}")
+                return "\n".join(txt)
+
+            if 'taxonom' in query_lower:
+                a_df, a_name = self._load_csv_from_known_locations('taxonomy')
+                b_df, b_name = self._load_csv_from_known_locations('taxonomy_table')
+                if a_df is None or b_df is None:
+                    return "Couldn't find two taxonomy files to compare. Upload or place them in the data folder."
+                res = self.compare_taxonomy(a_df, b_df)
+                if 'error' in res:
+                    return res['error']
+                lines = [f"🧬 Taxonomy compare: **{a_name}** vs **{b_name}** (columns: {', '.join(res['columns_compared'])})"]
+                for lvl in res['levels']:
+                    lines.append(f"- {lvl['relation']}: pairs {lvl['a_pairs']} vs {lvl['b_pairs']}, overlap {lvl['overlap']}, Jaccard={lvl['jaccard']:.3f}")
+                return "\n".join(lines)
+
+            if 'mapping' in query_lower or 'species map' in query_lower:
+                a_df, a_name = self._load_csv_from_known_locations('mapping')
+                b_df, b_name = self._load_csv_from_known_locations('augmented')
+                if a_df is None or b_df is None:
+                    return "Couldn't find two mapping files to compare. Upload mapping and augmented mapping first."
+                res = self.compare_mappings(a_df, b_df)
+                if 'error' in res:
+                    return res['error']
+                return (f"🧾 Mapping compare: **{a_name}** vs **{b_name}**\n"
+                        f"- Keys {res['a_keys']} vs {res['b_keys']}, overlap {res['overlap']}, Jaccard={res['jaccard']:.3f}")
+        if any(term in query_lower for term in ['history', 'my history', 'queries this session', 'show history', 'show my history']):
+            if not self.chat_history:
+                return "No history yet. Ask me something!"
+            lines = []
+            for i, h in enumerate(self.chat_history[-10:], 1):
+                u = h.get('user','').strip()
+                b = h.get('bot','').strip()
+                ts = h.get('timestamp','')
+                lines.append(f"{i}. [{ts}] You: {u}\n   Bot: {b[:180]}{'...' if len(b)>180 else ''}")
+            return "**Recent queries (last 10):**\n\n" + "\n\n".join(lines)
+    
         
         # Handle shutdown request
         if query_lower in ['shutdown', 'exit', 'quit']:
             return "SHUTDOWN_REQUESTED"
         
-        # Handle static Q&A first (these should work regardless of uploaded files)
+        # Handle static Q&A first ( which work regardless of uploaded files)
         if 'types' in query_lower and 'interaction' in query_lower:
             types_explanation = "**Interaction Types in InfIntE:**\n\n"
             for interaction_type, description in self.interaction_types.items():
@@ -943,7 +1392,6 @@ Microbiome interaction networks reveal important ecological patterns:
         elif any(word in query_lower for word in ['step-by-step', 'analysis process', 'how does', 'process']):
             return self.explain_analysis_process()
         
-        # Handle depth plot requests FIRST (before network to avoid conflict with 'plot' keyword)
         # Handle depth plot requests FIRST (before network to avoid conflict)
         depth_terms = [
             "depth plot", "show depth", "sequencing depth", "depth distribution",
@@ -959,14 +1407,34 @@ Microbiome interaction networks reveal important ecological patterns:
             if not self.current_analysis:
                 return "No analysis data available. Please upload and analyze data first."
             return "SHOW_NETWORK"
-        
+
+        if 'help' in query_lower:
+            return """
+**Available Commands:**
+- Ask about interaction types: "What are the interaction types?"
+- Explain specific interactions: "Explain interaction between SpeciesA and SpeciesB"  
+- Learn about the process: "How does the analysis work?"
+- Request visualizations: "Show me the network"
+- Query uploaded data: "List species", "Show taxonomy", "What phyla are present?"
+- Get help: "help"
+
+**Example Queries:**
+- "What is mutualism?"
+- "How does InfIntE work?"
+- "Show me interaction types"
+- "List all species in the data"
+- "What families are present?"
+            """
+
+        if any(term in query_lower for term in ['delete selected csv', 'delete selected csvs', 'remove selected csv', 'remove selected csvs']):
+            return "DELETE_SELECTED_CSVS"
         # Handle CSV data queries only after static Q&A
         csv_response = self.handle_csv_data_query(query_lower)
         if csv_response:
             return csv_response
         
-        # ---- Current Analysis Queries (High Priority) ----
-        # Dataset filtering commands - these should work BEFORE PDF search
+        # Analysis Queries 
+        # Dataset filtering commands 
         if any(word in query_lower for word in ['filter', 'show me', 'find', 'top', 'interactions with']) and self.current_analysis:
             try:
                 if 'abundance' in query_lower or any(pattern in query_lower for pattern in ['> 0.1', '> 0.5', '>0.1', '>0.5']):
@@ -982,6 +1450,11 @@ Microbiome interaction networks reveal important ecological patterns:
                     else:
                         threshold = 0.1  # Default threshold
                     
+                    if not self.current_analysis:
+                        return "No analysis data available. Please upload and analyze data first."
+                    if 'interactions' not in self.current_analysis:
+                        return "No interaction data found in current analysis."
+
                     # Filter interactions by compression value (proxy for abundance)
                     interactions = self.current_analysis['interactions']
                     if 'comp' in interactions.columns:
@@ -1042,17 +1515,27 @@ Microbiome interaction networks reveal important ecological patterns:
                             return result
                         else:
                             return "Compression data not available for ranking."
+
+            except KeyError as e:
+                if 'current_analysis' in str(e):
+                    return "No analysis data available. Please upload and analyze data first."
+                elif 'comp' in str(e):
+                    return "Compression data not available for abundance filtering. The analysis may not have completed successfully."
+                else:
+                    return f"Missing data field: {str(e)}"
+            except AttributeError:
+                return "No analysis data available. Please upload and analyze data first."
+
             except Exception as e:
                 return f"Error processing filter request: {str(e)}. Please try uploading and analyzing data first."
         
         # ---- PDF Search Queries ----
-        # Check for PDF search queries ONLY with explicit PDF references
         explicit_pdf_terms = ["pdf","according to the paper", "paper", "from the pdf", "paper says", "document states", "literature shows", "study mentions", "research paper", "in pdf"]
         if any(term in query_lower for term in explicit_pdf_terms) and self.uploaded_files['pdf_files']:
             return self.search_across_all_pdfs(query)
         
         # ---- CSV Data Queries ----
-        # Handle questions about uploaded CSV data
+        # Handles questions about uploaded CSV data
         if self.uploaded_files['csv_files']:
             csv_response = self.handle_intelligent_csv_query(query_lower)
             if csv_response:
@@ -1076,27 +1559,6 @@ Microbiome interaction networks reveal important ecological patterns:
                 else:
                     return "Please specify two species names to explain their interaction."
         
-        # These are handled earlier in the function now
-        
-        elif 'help' in query_lower:
-            return """
-**Available Commands:**
-- Ask about interaction types: "What are the interaction types?"
-- Explain specific interactions: "Explain interaction between SpeciesA and SpeciesB"  
-- Learn about the process: "How does the analysis work?"
-- Request visualizations: "Show me the network"
-- Query uploaded data: "List species", "Show taxonomy", "What phyla are present?"
-- Get help: "help"
-
-**Example Queries:**
-- "What is mutualism?"
-- "Explain the interaction between Bacillus and Pseudomonas"
-- "How does InfIntE work?"
-- "Show me interaction types"
-- "List all species in the data"
-- "What families are present?"
-            """
-        
         elif any(term in query_lower for term in ["status", "current analysis", "what do we have", "summary", "combined analysis"]):
             if self.current_analysis:
                 interactions = self.current_analysis['interactions']
@@ -1113,9 +1575,14 @@ Microbiome interaction networks reveal important ecological patterns:
     def process_user_query_with_files(self, query: str) -> str:
         """Enhanced query processing that includes file content search"""
         query_lower = query.lower()
-        
-        # Check for PDF search queries
-        if any(term in query_lower for term in ["search", "find", "paper", "document", "literature", "study"]) and self.uploaded_files['pdf_files']:
+        pdf_hints = [
+        "pdf", "paper", "document", "literature", "study",
+        "according to the pdf", "according to pdf",
+        "according to the paper", "from the pdf", "from pdf",
+        "paper says", "document states", "literature shows",
+        "study mentions", "in the pdf", "in pdf"
+        ]
+        if self.uploaded_files['pdf_files'] and any(term in query_lower for term in pdf_hints):
             return self.search_across_all_pdfs(query)
         
         # Fall back to regular query processing
@@ -1343,7 +1810,7 @@ Microbiome interaction networks reveal important ecological patterns:
              (any(col in columns_lower for col in ['species1', 'species2', 'interaction', 'type'])):
             return 'interactions'
         elif len(df.columns) > 10 and df.select_dtypes(include=[np.number]).shape[1] > 5:
-            return 'otu_table'  # Likely OTU table with many numeric columns
+            return 'otu_table'  
         
         return 'generic'
     
@@ -1441,7 +1908,7 @@ Microbiome interaction networks reveal important ecological patterns:
                 else:
                     return "Please specify what you want to search for. Example: 'find Bacillus'"
             
-            return None  # No match found
+            return None  # If no match found
             
         except Exception as e:
             return f"Error processing CSV query: {str(e)}"
@@ -1450,6 +1917,11 @@ Microbiome interaction networks reveal important ecological patterns:
         """Handle taxonomy queries with intelligent parsing and filtering"""
         import re
         
+        dna_hits = re.findall(r'[ACGTNacgtn]{20,}', query_lower.replace(" ", ""))
+        if dna_hits:
+            seq = max(dna_hits, key=len)  # take the longest stretch if multiple present
+            return self.lookup_full_taxonomy_for_otu_sequence(seq)
+            
         # Available taxonomy columns (case-insensitive mapping)
         taxonomy_levels = {}
         for col in df.columns:
@@ -1464,44 +1936,60 @@ Microbiome interaction networks reveal important ecological patterns:
             return [name for name in taxonomic_names if len(name) > 2]
         
         # Parse relationship queries like "order X has which family"
-        relationship_patterns = [
-            (r'(\w+)\s+(\w+)\s+has\s+which\s+(\w+)', 'filter_by_parent'),  # "order Micrococcales has which family"
-            (r'which\s+(\w+)\s+are\s+in\s+(\w+)\s+(\w+)', 'filter_by_parent'),  # "which families are in order Micrococcales"
-            (r'(\w+)\s+in\s+(\w+)\s+(\w+)', 'filter_by_parent'),  # "families in order Micrococcales"
-            (r'show\s+(\w+)\s+for\s+(\w+)\s+(\w+)', 'filter_by_parent'),  # "show families for order Micrococcales"
+        #   A) "<child> of <parent> <name>"                e.g., "phylum of order Micrococcales"
+        #   B) "<parent> <name> has which <child>"         e.g., "order Micrococcales has which phylum"
+        #   C) "which <child> are in <parent> <name>"      e.g., "which families are in order Micrococcales"
+        #   D) "<child> in <parent> <name>"                e.g., "families in order Micrococcales"
+        #   E) "show <child> for <parent> <name>"          e.g., "show families for order Micrococcales"
+        rel_patterns = [
+            (r'\b(kingdom|phylum|class|order|family|genus)\s+of\s+(kingdom|phylum|class|order|family|genus)\s+([\w\-]+)\b', 'A'),
+            (r'\b(kingdom|phylum|class|order|family|genus)\s+([\w\-]+)\s+has\s+which\s+(kingdom|phylum|class|order|family|genus)\b', 'B'),
+            (r'\bwhich\s+(kingdom|phylum|class|order|family|genus)\s+are\s+in\s+(kingdom|phylum|class|order|family|genus)\s+([\w\-]+)\b', 'C'),
+            (r'\b(kingdom|phylum|class|order|family|genus)\s+in\s+(kingdom|phylum|class|order|family|genus)\s+([\w\-]+)\b', 'D'),
+            (r'\bshow\s+(kingdom|phylum|class|order|family|genus)\s+for\s+(kingdom|phylum|class|order|family|genus)\s+([\w\-]+)\b', 'E'),
         ]
-        
-        for pattern, query_type in relationship_patterns:
-            match = re.search(pattern, query_lower)
-            if match:
-                if query_type == 'filter_by_parent':
-                    groups = match.groups()
-                    if len(groups) == 3:
-                        # Pattern: "order Micrococcales has which family"
-                        parent_level = groups[0].lower()  # order
-                        parent_name = groups[1]  # Micrococcales
-                        child_level = groups[2].lower()  # family
-                        
-                        # Check if we have the required columns
-                        if parent_level in taxonomy_levels and child_level in taxonomy_levels:
-                            parent_col = taxonomy_levels[parent_level]
-                            child_col = taxonomy_levels[child_level]
-                            
-                            # Filter data by parent taxonomic level
-                            filtered_df = df[df[parent_col].str.contains(parent_name, case=False, na=False)]
-                            
-                            if len(filtered_df) > 0:
-                                child_taxa = filtered_df[child_col].dropna().unique()
-                                child_taxa = [t for t in child_taxa if str(t) != 'nan' and str(t).strip()]
-                                
-                                if len(child_taxa) > 0:
-                                    return f"**{child_level.title()}s in {parent_level} '{parent_name}':**\n\n" + \
-                                           "\n".join([f"• {taxon}" for taxon in sorted(child_taxa)])
-                                else:
-                                    return f"No {child_level}s found for {parent_level} '{parent_name}' in {filename}"
-                            else:
-                                return f"No records found for {parent_level} '{parent_name}' in {filename}"
-        
+        for pat, kind in rel_patterns:
+            _m = re.search(pat, query_lower)
+            if not _m:
+                continue
+            if kind == 'A':
+                child_level  = _m.group(1).lower()
+                parent_level = _m.group(2).lower()
+                parent_name  = _m.group(3).strip()
+            elif kind == 'B':
+                parent_level = _m.group(1).lower()
+                parent_name  = _m.group(2).strip()
+                child_level  = _m.group(3).lower()
+            else:  
+                child_level  = _m.group(1).lower()
+                parent_level = _m.group(2).lower()
+                parent_name  = _m.group(3).strip()
+
+            if parent_level not in taxonomy_levels or child_level not in taxonomy_levels:
+                return f"Your taxonomy file doesn’t have '{child_level}' and '{parent_level}' columns."
+
+            parent_col = taxonomy_levels[parent_level]
+            child_col  = taxonomy_levels[child_level]
+
+            # Exact match first, then partial
+            rows = df[df[parent_col].astype(str).str.lower() == parent_name.lower()]
+            if rows.empty:
+                rows = df[df[parent_col].astype(str).str.contains(parent_name, case=False, na=False)]
+
+            if not rows.empty:
+                vals = sorted(rows[child_col].dropna().astype(str).unique())
+                if len(vals) == 1:
+                    return f"**{child_col} of {parent_col} '{parent_name}':**\n\n• {vals[0]}"
+                bullets = "\n".join(f"• {v}" for v in vals[:20])
+                extra = "" if len(vals) <= 20 else f"\n… and {len(vals)-20} more"
+                return f"**{child_col} of {parent_col} '{parent_name}':**\n\n{bullets}{extra}"
+
+            # Nothing found -> suggest closest parent names if helper exists
+            try:
+                hint = self._suggest_closest_taxa(df, parent_col, parent_name)
+            except Exception:
+                hint = ""
+            return f"No records found for {parent_level} '{parent_name}' in {filename}.{hint}"
         # Handle reverse queries like "which order has family Microbacteriaceae"
         reverse_patterns = [
             (r'which\s+(\w+)\s+has\s+(\w+)\s+(\w+)', 'find_parent'),  # "which order has family Microbacteriaceae"
@@ -1535,7 +2023,7 @@ Microbiome interaction networks reveal important ecological patterns:
                                 else:
                                     return f"No {parent_level}s found containing {child_level} '{child_name}' in {filename}"
                             else:
-                                return f"No records found for {child_level} '{child_name}' in {filename}"
+                                return f"No records found for {child_level} '{child_name}' in {filename}." + self._suggest_closest_taxa(df, child_col, child_name)
         
         # Handle simple listing queries
         simple_queries = {
@@ -1544,7 +2032,8 @@ Microbiome interaction networks reveal important ecological patterns:
             'classes': 'class', 'class': 'class', 'what classes': 'class',
             'orders': 'order', 'order': 'order', 'what orders': 'order',
             'genus': 'genus', 'genera': 'genus', 'what genus': 'genus', 'list genus': 'genus', 'show genus': 'genus',
-            'species': 'species', 'what species': 'species', 'list species': 'species'
+            'species': 'species', 'what species': 'species', 'list species': 'species',
+            'kingdom': 'kingdom', 'kingdoms': 'kingdom', 'what kingdoms': 'kingdom', 'show kingdoms': 'kingdom',
         }
         
         for query_term, level in simple_queries.items():
@@ -1557,7 +2046,7 @@ Microbiome interaction networks reveal important ecological patterns:
             return self.handle_taxonomy_summary(df, filename)
         
         # Default fallback
-        return f"I couldn't understand your taxonomy query. Try asking:\n" + \
+        return f"I couldn't understand your taxonomy query. Try asking (also works: 'phylum of order <Name>'):\n" + \
                "• 'order Micrococcales has which family'\n" + \
                "• 'which order has family Microbacteriaceae'\n" + \
                "• 'show families' or 'list genus'\n" + \
@@ -1982,7 +2471,7 @@ Microbiome interaction networks reveal important ecological patterns:
             # Extract text from PDF
             text = ""
             try:
-                # Try PyMuPDF first
+                
                 doc = fitz.open(file_path)
                 for page in doc:
                     text += page.get_text()
@@ -2108,7 +2597,7 @@ Microbiome interaction networks reveal important ecological patterns:
         
         response = f"🔍 **Search Results for '{query}'** (found in {len(results)} documents):\n\n"
         
-        for i, result in enumerate(results[:5], 1):  # Top 5 results
+        for i, result in enumerate(results[:5], 1):  
             response += f"**{i}. From {result['filename']}:**\n"
             response += f"{result['context']}\n"
             response += f"*Relevance: {result['relevance_score']:.2f}*\n\n"
@@ -2116,7 +2605,8 @@ Microbiome interaction networks reveal important ecological patterns:
         if len(results) > 5:
             response += f"*...and {len(results) - 5} more results. Try a more specific query for better results.*"
         
-        return response.strip()
+        response = response.strip()
+        return response
 
     def handle_intelligent_csv_query(self, query_lower: str) -> str:
         """Intelligently handle queries about uploaded CSV files"""
@@ -2135,6 +2625,19 @@ Microbiome interaction networks reveal important ecological patterns:
             df = file_info['data']
             csv_type = file_info.get('analysis_results', {}).get('csv_type', 'generic')
             
+            # quick path: if user pasted a DNA-like sequence and asks for taxonomy/all ranks
+            dna_like = re.search(r'\b[ACGTNacgtn]{20,}\b', query_lower, flags=re.IGNORECASE)
+            asks_tax = any(w in query_lower for w in [
+                'taxonomy', 'kingdom', 'phylum', 'class', 'order', 'family', 'genus'
+            ])
+            if dna_like and asks_tax:
+                seq = dna_like.group(0)
+                return self.lookup_full_taxonomy_for_otu_sequence(seq)
+
+            dna_prompt = re.search(r'species\s+([ACGTNacgtn]{20,})', query_lower, flags=re.IGNORECASE)
+            if dna_prompt and asks_tax:
+                return self.lookup_full_taxonomy_for_otu_sequence(dna_prompt.group(1))
+
             # Try to answer any question about the CSV data intelligently
             return self.handle_intelligent_data_query(df, filename, csv_type, query_lower)
             
@@ -2145,10 +2648,12 @@ Microbiome interaction networks reveal important ecological patterns:
         """Handle OTU ID to species name lookup queries and species to OTU ID queries"""
         import re
 
-        # Check for species name to OTU ID queries FIRST (before numeric ID patterns)
+        # Check for species name to OTU ID queries 
         species_patterns = [
             r'otu.{0,5}id.{0,5}for.{0,5}(?:the.{0,5})?(?:species.{0,5}name.{0,5})?([A-Za-z][A-Za-z0-9_\-]+)(?:\?|$)',
             r'what.{0,5}is.{0,5}the.{0,5}otu.{0,5}id.{0,5}for.{0,5}(?:the.{0,5})?(?:species.{0,5}name.{0,5})?([A-Za-z][A-Za-z0-9_\-]+)(?:\?|$)',
+            r'otu.{0,5}id.{0,5}of.{0,5}(?:the.{0,5})?(?:species.{0,5}name.{0,5})?([A-Za-z][A-Za-z0-9_\-]+)(?:\?|$)',
+            r'find.{0,5}otu.{0,5}id.{0,5}of.{0,5}(?:the.{0,5})?(?:species.{0,5}name.{0,5})?([A-Za-z][A-Za-z0-9_\-]+)(?:\?|$)',
             r'find.{0,5}otu.{0,5}id.{0,5}(?:for.{0,5})?([A-Za-z][A-Za-z0-9_\-]+)(?:\?|$)'
         ]
         
@@ -2159,7 +2664,7 @@ Microbiome interaction networks reveal important ecological patterns:
                 return self.lookup_species_to_otu(species_name)
         
         
-        # Check for numeric ID queries first
+        # Check for numeric ID queries 
         numeric_id_patterns = [
             r'(?:numeric.{0,5}id|id).{0,10}(?:of.{0,5}|for.{0,5})?(?:the.{0,5})?(?:species.{0,5}name.{0,5})?([A-Za-z][A-Za-z0-9_\-]+)(?:\?|$)',
             r'what.{0,5}is.{0,5}the.{0,5}(?:numeric.{0,5})?id.{0,5}(?:of.{0,5}|for.{0,5})?(?:the.{0,5})?(?:species.{0,5}name.{0,5})?([A-Za-z][A-Za-z0-9_\-]+)(?:\?|$)',
@@ -2173,7 +2678,7 @@ Microbiome interaction networks reveal important ecological patterns:
                 species_name = match.group(1).strip()
                 return self.lookup_numeric_id_for_species(species_name)
         
-        # Check for OTU sequence queries first (before taxonomy patterns)
+        # Check for OTU sequence queries 
         otu_sequence_patterns = [
             r'species\s+([ACGT]{50,})\s+has\s+which\s+(order|family|class|phylum|kingdom)',
             r'([ACGT]{50,})\s+(?:has\s+which|what\s+is\s+the)\s+(order|family|class|phylum|kingdom)',
@@ -2190,6 +2695,8 @@ Microbiome interaction networks reveal important ecological patterns:
         
         # Check for taxonomy queries (genus to family, family to genus, etc.)
         taxonomy_patterns = [
+            r'(?:(?:kingdom|phylum|class|order|family|genus|species)\s+)?([A-Za-z][A-Za-z0-9_\-]+)\s+(?:has|belongs?\s+to|is\s+in)\s+which\s+(?:kingdom|phylum|class|order|family|genus)',
+            r'genus\s+([A-Za-z][A-Za-z0-9_\-]+)\s+(?:has|belongs?\s+to|is\s+in)\s+which\s+(?:phylum|class|order|family|kingdom)',
             r'(?:what\s+is\s+the\s+)?family\s+name\s+of\s+genus\s+([A-Za-z][A-Za-z0-9_\-]+)',
             r'(?:what\s+is\s+the\s+)?genus\s+of\s+(?:the\s+)?family\s+(?:name\s+)?([A-Za-z][A-Za-z0-9_\-]+)',
             r'(?:what\s+is\s+the\s+)?phylum\s+of\s+(?:genus\s+|order\s+)?([A-Za-z][A-Za-z0-9_\-]+)',
@@ -2206,7 +2713,7 @@ Microbiome interaction networks reveal important ecological patterns:
             if match:
                 search_term = match.group(1).strip()
                 return self.lookup_taxonomy_info(search_term, query_lower)
-        
+        END = r'(?:[?.!]|$)'
         # Check for species name to OTU ID queries
         species_patterns = [
             r'otu.{0,5}id.{0,5}for.{0,5}(?:the.{0,5})?(?:species.{0,5}name.{0,5})?([A-Za-z][A-Za-z0-9_\-]+)(?:\?|$)',
@@ -2219,6 +2726,19 @@ Microbiome interaction networks reveal important ecological patterns:
             r'unique.{0,5}name.{0,5}(?:of.{0,5})?(?:the.{0,5})?(?:species.{0,5}name.{0,5})?([A-Za-z][A-Za-z0-9_\-]+)(?:\?|$)',
             r'what.{0,5}is.{0,5}the.{0,5}unique.{0,5}name.{0,5}(?:of.{0,5})?(?:the.{0,5})?(?:species.{0,5}name.{0,5})?([A-Za-z][A-Za-z0-9_\-]+)(?:\?|$)'
         ]
+
+        unique_name_by_otu_patterns = [
+            r'(?:what.{0,5}is.{0,5})?unique.{0,5}name.{0,5}(?:for|of).{0,5}otu.{0,5}id.{0,5}`?([A-Za-z0-9_\-]+)`?(?:\?|$)',
+            r'unique.{0,5}name.{0,5}for.{0,5}otu.{0,5}id.{0,5}`?([A-Za-z0-9_\-]+)`?(?:\?|$)',
+            r'unique.{0,5}name.{0,5}of.{0,5}otu.{0,5}id.{0,5}`?([A-Za-z0-9_\-]+)`?(?:\?|$)',
+        ]
+
+        for pattern in unique_name_by_otu_patterns:
+            match = re.search(pattern, query_lower)
+            if match:
+                otu_id = match.group(1).strip()
+                return self.lookup_unique_name_by_otu_id(otu_id)
+
         
         for pattern in unique_name_patterns:
             match = re.search(pattern, query_lower)
@@ -2239,7 +2759,7 @@ Microbiome interaction networks reveal important ecological patterns:
         if not otu_matches:
             return None
         
-        otu_id = otu_matches[0]  # Take the first/longest match
+        otu_id = otu_matches[0]  # THis takes the first/longest match
         
         # Search through uploaded CSV files for species mapping
         for filename, file_info in self.uploaded_files['csv_files'].items():
@@ -2273,6 +2793,65 @@ Microbiome interaction networks reveal important ecological patterns:
                f"❌ No matching species found in uploaded files.\n\n" + \
                f"Please ensure you have uploaded a species mapping CSV file with 'otu_id' and 'species_name' columns."
     
+    def lookup_unique_name_by_otu_id(self, otu_id: str) -> str:
+        """Look up unique name for a given OTU ID"""
+        import re
+
+        # Normalize the input (strip whitespace/backticks)
+        otu_id_norm = str(otu_id).strip().strip('`')
+
+        # Search through uploaded CSV files
+        for filename, file_info in self.uploaded_files['csv_files'].items():
+            df = file_info['data']
+
+        # Need at least otu_id + species_name; unique_name is optional
+            if 'otu_id' in df.columns and 'species_name' in df.columns:
+                otu_col = df['otu_id'].astype(str)
+
+            # Exact match (case-insensitive)
+                exact = df[otu_col.str.casefold() == otu_id_norm.casefold()]
+
+                if len(exact) > 0:
+                    row = exact.iloc[0]
+                    species = row.get('species_name', '')
+                    unique = row.get('unique_name') if 'unique_name' in df.columns else None
+
+                    return (
+                        "**Unique Name Lookup Result:**\n\n"
+                        f"🔬 **Species Name:** **{species}**\n"
+                        f"🧬 **OTU ID:** `{otu_id_norm}`\n"
+                        + (f"🏷️ **Unique Name:** **{str(unique)}**\n\n" if unique is not None and str(unique).strip() != "" else "\n")
+                        + f"*Found in {filename}*"
+                    )
+
+            # Partial match (helpful if OTU IDs are long strings)
+                partial = df[otu_col.str.casefold().str.startswith(otu_id_norm.casefold())]
+
+                if len(partial) > 0:
+                    results = []
+                    for _, row in partial.head(3).iterrows():  # Show top 3 matches
+                        pid = str(row.get('otu_id', ''))
+                        pspp = row.get('species_name', '')
+                        punq = row.get('unique_name', '') if 'unique_name' in df.columns else ''
+                        if punq and str(punq).strip() != "":
+                            results.append(f"• **{pspp}** — OTU `{pid}` → {punq}")
+                        else:
+                            results.append(f"• **{pspp}** — OTU `{pid}`")
+
+                    return (
+                        "**Partial OTU ID Matches Found:**\n\n"
+                        f"🔍 **Search term:** `{otu_id_norm}`\n\n"
+                        + "\n".join(results)
+                        + f"\n\n*Found in {filename}*"
+                    )
+
+        return (
+            "**OTU ID Not Found:**\n\n"
+            f"🧬 **Query OTU ID:** `{otu_id_norm}`\n"
+            "❌ No matching record with a unique name found in uploaded files.\n\n"
+            "Please ensure your CSV has 'otu_id', 'species_name', and (optionally) 'unique_name' columns."
+        )
+
     def lookup_unique_name_for_species(self, species_name: str) -> str:
         """Look up OTU ID for a given species name"""
         # Clean up the species name - remove common prefixes
@@ -2345,7 +2924,7 @@ Microbiome interaction networks reveal important ecological patterns:
                     return f"**OTU ID Lookup Result:**\n\n" + \
                            f"🔬 **Species Name:** **{species_name}**\n" + \
                            f"🧬 **OTU ID:** `{otu_id}`\n" + \
-                           additional_info + \
+                           f"{additional_info}\n" + \
                            f"\n*Found in {filename}*"
                 
                 # Try partial match
@@ -2400,7 +2979,7 @@ Microbiome interaction networks reveal important ecological patterns:
                     return f"**Numeric ID Lookup Result:**\n\n" + \
                            f"🔬 **Species Name:** **{species_name}**\n" + \
                            f"🔢 **Numeric ID:** **{numeric_id}**\n" + \
-                           additional_info + \
+                           f"{additional_info}\n" + \
                            f"\n*Found in {filename}*"
                 
                 # Try partial match
@@ -2422,35 +3001,151 @@ Microbiome interaction networks reveal important ecological patterns:
                f"Please ensure you have uploaded a species mapping CSV file with 'numeric_id' and 'species_name' columns."
     
     def lookup_taxonomy_info(self, search_term: str, query_lower: str) -> str:
-        """Look up taxonomy information for a given genus/family/etc."""
+        """Look up taxonomy information for any rank pair, plus legacy fallbacks."""
         import re
-        
-        # Clean up the search term
-        search_term = search_term.strip().lower()
-        
-        # Determine what type of lookup this is based on the query structure
-        if 'family name of genus' in query_lower:
-            return self.lookup_family_of_genus(search_term)
-        elif 'genus of' in query_lower and 'family' in query_lower:
-            return self.lookup_genus_of_family(search_term)
-        elif 'phylum of order' in query_lower:
-            return self.lookup_phylum_of_order(search_term)
-        elif 'phylum of genus' in query_lower:
-            return self.lookup_phylum_of_genus(search_term)
-        elif 'class of genus' in query_lower:
-            return self.lookup_class_of_genus(search_term)
-        elif 'order of genus' in query_lower:
-            return self.lookup_order_of_genus(search_term)
-        elif 'order of phylum' in query_lower:
-            return self.lookup_order_of_phylum(search_term)
-        elif 'kingdom of' in query_lower:
-            return self.lookup_kingdom_of_taxon(search_term)
-        elif 'species of genus' in query_lower:
-            return self.lookup_species_of_genus(search_term)
-        elif 'species' in query_lower and any(rank in query_lower for rank in ['order', 'family', 'class', 'phylum', 'kingdom']):
-            return self.lookup_species_by_taxonomy(search_term, query_lower)
+
+        q = (query_lower or "").strip().lower()
+        token = (search_term or "").strip().lower()
+
+       
+        m = re.search(
+            r'\b(?:(kingdom|phylum|class|order|family|genus|species)\s+)?'   
+            r'([a-z0-9_\-]+)\s+'                                             
+            r'(?:has|belongs?\s+to|is\s+in)\s+which\s+'                      
+            r'(kingdom|phylum|class|order|family|genus)\b',                 
+            q
+        )
+        if m:
+            src_rank, name, dst_rank = m.groups()
+            return self._dispatch_taxonomy_pair(name, src_rank, dst_rank)
+
+        # B) "what is the <rank> of <rank?> <name>"
+        m = re.search(
+            r'\b(?:what\s+is\s+the\s+)?'
+            r'(kingdom|phylum|class|order|family|genus)\s+of\s+'
+            r'(?:(kingdom|phylum|class|order|family|genus)\s+)?'
+            r'([a-z0-9_\-]+)\b',
+            q
+        )
+        if m:
+            dst_rank, src_rank, name = m.groups()
+            return self._dispatch_taxonomy_pair(name, src_rank, dst_rank)
+
+        # --- Legacy specific fallbacks (This is kept for backward compatibility) ---
+        if 'family name of genus' in q:
+            return self.lookup_family_of_genus(token)
+        elif 'genus of' in q and 'family' in q:
+            return self.lookup_genus_of_family(token)
+        elif 'phylum of order' in q:
+            return self.lookup_phylum_of_order(token)
+        elif 'phylum of genus' in q:
+            return self.lookup_phylum_of_genus(token)
+        elif 'class of genus' in q:
+            return self.lookup_class_of_genus(token)
+        elif 'order of genus' in q:
+            return self.lookup_order_of_genus(token)
+        elif 'order of phylum' in q:
+            return self.lookup_order_of_phylum(token)
+        elif 'kingdom of' in q:
+            return self.lookup_kingdom_of_taxon(token)
+        elif 'species of genus' in q:
+            return self.lookup_species_of_genus(token)
+        elif 'species' in q and any(r in q for r in ['order', 'family', 'class', 'phylum', 'kingdom']):
+            return self.lookup_species_by_taxonomy(token, q)
+
+        # Default
+        return self.lookup_family_of_genus(token)
+
+    def _dispatch_taxonomy_pair(self, name, src_rank, dst_rank) -> str:
+        """Route (source_rank -> target_rank) to existing helpers; else fallback to generic table lookup."""
+        name = (name or "").strip()
+        src = (src_rank or "").lower() or None
+        dst = (dst_rank or "").lower()
+
+        # common fast path
+        if dst == "kingdom":
+            return self.lookup_kingdom_of_taxon(name)
+
+        # use existing specific helpers when available
+        mapping = {
+        ("genus",  "family"):  self.lookup_family_of_genus,
+        ("genus",  "order"):   self.lookup_order_of_genus,
+        ("genus",  "class"):   self.lookup_class_of_genus,
+        ("genus",  "phylum"):  self.lookup_phylum_of_genus,
+        ("family", "genus"):   self.lookup_genus_of_family,
+        ("order",  "phylum"):  self.lookup_phylum_of_order,
+        ("phylum", "order"):   self.lookup_order_of_phylum,
+    }
+
+        if src and (src, dst) in mapping:
+            return mapping[(src, dst)](name)
+
+        if not src:
+            for try_src in ("genus", "family", "order", "class", "phylum"):
+                if (try_src, dst) in mapping:
+                    try:
+                        return mapping[(try_src, dst)](name)
+                    except Exception:
+                        pass  # try next
+
+        # generic table-driven answer (works for any pair found in taxonomy table)
+        return self._lookup_rank_generic(name, dst, src)
+
+    def _lookup_rank_generic(self, token, target_rank, source_rank=None) -> str:
+        """Generic, table-driven answer for any (source -> target) pair using uploaded taxonomy CSV."""
+        token_l = (token or "").strip().lower()
+        target = (target_rank or "").lower()
+        source = (source_rank or "").lower() if source_rank else None
+
+        # To find a taxonomy dataframe among uploaded CSVs
+        csvs = (self.uploaded_files or {}).get("csv_files", {})
+        best_df, best_name, cols = None, None, None
+        for fname, meta in csvs.items():
+            df = meta.get("data") if isinstance(meta, dict) else None
+            if df is None or getattr(df, "empty", False):
+                continue
+            cols_lower = {c.lower(): c for c in df.columns}
+            if len({"kingdom","phylum","class","order","family","genus","species"} & set(cols_lower.keys())) >= 3:
+                best_df, best_name, cols = df, fname, cols_lower
+                break
+        if best_df is None:
+            return "No taxonomy table found. Please upload a taxonomy CSV with columns like Genus/Family/Order/Phylum."
+
+        candidates = best_df
+        if source and source in cols:
+            candidates = candidates[candidates[cols[source]].astype(str).str.strip().str.lower() == token_l]
         else:
-            return self.lookup_family_of_genus(search_term)
+            hit = False
+            for r in ("genus","species","family","order","class","phylum","kingdom"):
+                if r in cols:
+                    mask = candidates[cols[r]].astype(str).str.strip().str.lower() == token_l
+                    if mask.any():
+                        candidates = candidates[mask]
+                        source = r
+                        hit = True
+                    break
+        if not hit:
+            return f"Could not find '{token}' in the taxonomy table."
+
+        if target not in cols:
+            return f"'{target_rank}' column not present in the taxonomy table."
+
+        values = candidates[cols[target]].dropna().astype(str).str.strip().unique().tolist()
+        if not values:
+            return f"No {target_rank} found for {source or 'taxon'} '{token}'."
+
+        pretty_src = (source or "taxon").capitalize()
+        pretty_dst = target_rank.capitalize()
+        src_val    = token
+        dst_val    = values[0] if len(values) == 1 else ", ".join(values[:10]) + (" …" if len(values) > 10 else "")
+
+        return (
+            f"<div><strong>Taxonomy Lookup Result:</strong><br>"
+            f"🧬 <strong>{pretty_src}:</strong> {src_val}<br>"
+            f"🌿 <strong>{pretty_dst}:</strong> {dst_val}<br>"
+            f"<em>*Found in {best_name}*</em></div>"
+        )
+
     
     def lookup_family_of_genus(self, genus_name: str) -> str:
         """Look up family name for a given genus"""
@@ -2785,7 +3480,7 @@ Microbiome interaction networks reveal important ecological patterns:
     
     def lookup_taxonomy_by_otu_sequence(self, otu_sequence: str, rank_requested: str) -> str:
         """Look up taxonomy information for an OTU sequence"""
-        # First, find the species name for this OTU sequence
+        # First, it finds the species name for this OTU sequence
         for filename, file_info in self.uploaded_files['csv_files'].items():
             df = file_info['data']
             
@@ -2827,7 +3522,7 @@ Microbiome interaction networks reveal important ecological patterns:
         if not rank_column:
             return f"Unknown taxonomy rank: {rank_requested}"
         
-        # Search taxonomy files for this species
+        # Searches taxonomy files for this species
         for filename, file_info in self.uploaded_files['csv_files'].items():
             df = file_info['data']
             
@@ -2880,6 +3575,177 @@ Microbiome interaction networks reveal important ecological patterns:
                f"🔍 **Search term:** {phylum_name}\n" + \
                f"❌ No matching phylum found in uploaded taxonomy files."
     
+
+    def _is_dna_series(self, s, min_ratio=0.7, min_len=20):
+        import re
+        vals = s.dropna().astype(str).head(200)
+        if vals.empty:
+            return False
+        dna = vals.str.fullmatch(r'[ACGTNacgtn]+', na=False)
+        long = vals.str.len().ge(min_len)
+        return (dna & long).mean() >= min_ratio
+
+    def _normcolmap(self, df):
+        """Case-insensitive map: lower -> original col name"""
+        return {c.lower(): c for c in df.columns}
+
+    def _looks_like_sequence_col(self, colname: str) -> bool:
+        colname_l = colname.lower()
+        
+        return any(k in colname_l for k in ["sequence", "dna", "otu", "id"])
+
+    def _first_taxonomy_row_for_species(self, species: str):
+        """Search any uploaded CSV that looks like a taxonomy table for a row about this species."""
+        wanted = ["kingdom","phylum","class","order","family","genus","species"]
+        for fname, finfo in (self.uploaded_files.get("csv_files") or {}).items():
+            df = finfo.get("data")
+            if df is None or not isinstance(df, pd.DataFrame):
+                continue
+            cmap = self._normcolmap(df)
+            have = [r for r in wanted if r in cmap]
+            if len(have) < 3:
+                continue  
+
+            # prefer matching by Species if present
+            if "species" in cmap:
+                rows = df[df[cmap["species"]].astype(str).str.lower().str.contains(species.lower(), na=False)]
+                if not rows.empty:
+                    return rows.iloc[0], fname
+
+            # otherwise: try any rank columns
+            mask = pd.Series(False, index=df.index)
+            for r in have:
+                mask |= df[cmap[r]].astype(str).str.lower().str.contains(species.lower(), na=False)
+            rows = df[mask]
+            if not rows.empty:
+                return rows.iloc[0], fname
+        return None, None
+
+    def _species_from_sequence(self, seq: str):
+        """
+        Try to resolve a species name from a sequence by:
+        1) exact/loose match against obvious sequence/OTU columns
+        2) using an explicit mapping table if present (columns: otu_id -> species_name)
+        Returns (species_name or None, provenance_info)
+        """
+        seq_u = seq.upper()
+
+        # 1) Search any 'sequence-like' column
+        for fname, finfo in (self.uploaded_files.get("csv_files") or {}).items():
+            df = finfo.get("data")
+            if df is None or not isinstance(df, pd.DataFrame):
+                continue
+            cmap = self._normcolmap(df)
+            for col in df.columns:
+                is_seq_col = self._looks_like_sequence_col(col) or self._is_dna_series(df[col])
+                if not is_seq_col:
+                    continue
+                s = df[col].astype(str)
+                
+                # exact match first
+                su = s.str.upper()
+                hits = df[su == seq_u]
+                if not hits.empty:
+                    # if a species column is here, take it; or fall back to best of taxonomic columns
+                    
+                    if "species" in cmap:
+                        return str(hits.iloc[0][cmap["species"]]).strip(), f"{fname}:{col}"
+                    # try taking the most specific of genus/species-like columns
+                    for k in ["genus","family","order","class","phylum","kingdom"]:
+                        if k in cmap:
+                            return str(hits.iloc[0][cmap[k]]).strip(), f"{fname}:{col}"
+                
+                hits = df[su.str.contains(seq_u[:50], na=False, regex=False)]
+                if not hits.empty:
+                    if "species" in cmap:
+                        return str(hits.iloc[0][cmap["species"]]).strip(), f"{fname}:{col}~contains"
+                    for k in ["genus","family","order","class","phylum","kingdom"]:
+                        if k in cmap:
+                            return str(hits.iloc[0][cmap[k]]).strip(), f"{fname}:{col}~contains"
+
+        # 2) Tries explicit mapping tables (otu_id -> species_name)
+        for fname, finfo in (self.uploaded_files.get("csv_files") or {}).items():
+            df = finfo.get("data")
+            if df is None or not isinstance(df, pd.DataFrame):
+                continue
+            cmap = self._normcolmap(df)
+            if "otu_id" in cmap and "species_name" in cmap:
+                s = df[cmap["otu_id"]].astype(str).str.upper()
+                hits = df[s == seq_u]
+                if not hits.empty:
+                    return str(hits.iloc[0][cmap["species_name"]]).strip(), f"{fname}:mapping"
+                hits = df[s.str.contains(seq_u[:50], na=False, regex=False)]
+                if not hits.empty:
+                    return str(hits.iloc[0][cmap["species_name"]]).strip(), f"{fname}:mapping~contains"
+
+        return None, None
+
+    def lookup_full_taxonomy_for_otu_sequence(self, sequence: str) -> str:
+        """
+        Main entry: DNA/OTU sequence -> (Species) -> full ranks.
+        Works with taxonomy_table_short.csv (Kingdom..Genus..Species) or any similar file.
+        """
+        if not sequence or len(sequence.strip()) < 10:
+            return "Please provide a valid DNA/OTU sequence."
+
+        seq = re.sub(r"[^ACGTNacgtn]", "", sequence).upper()
+        if len(seq) < 10:
+            return "That doesn't look like a valid DNA-like sequence."
+
+        # find species (or closest label) from uploaded CSVs
+        species, prov = self._species_from_sequence(seq)
+        if not species:
+            return (
+                "**OTU/Sequence not found in uploaded data.**\n\n"
+                f"🧬 Query: `{seq[:60]}…`\n"
+                "Please upload a mapping (e.g., columns **otu_id, species_name**) or a CSV that contains both the sequence and taxonomy."
+            )
+
+        # get taxonomy row
+        row, src = self._first_taxonomy_row_for_species(species)
+        if row is None:
+            return (
+                f"**Species resolved:** {species}\n"
+                "But I couldn't find a taxonomy row (Kingdom..Genus) in your uploaded CSVs. "
+                "Upload a taxonomy CSV (e.g., `taxonomy_table_short.csv`) with columns like "
+                "`Kingdom, Phylum, Class, Order, Family, Genus, Species`."
+            )
+
+        def getv(keys):
+            for k in keys:
+                if k in row.index:
+                    v = str(row[k]).strip()
+                    if v and v != 'nan':
+                        return v
+            return "—"
+
+        K = getv(["Kingdom","kingdom"])
+        P = getv(["Phylum","phylum"])
+        C = getv(["Class","class"])
+        O = getv(["Order","order"])
+        F = getv(["Family","family"])
+        G = getv(["Genus","genus"])
+        S = getv(["Species","species"])
+
+        out = [
+            "**Full Taxonomy**",
+            f"🧬 **Sequence:** `{seq[:60]}…`",
+            f"🔬 **Species:** {S if S != '—' else species}",
+            "",
+            f"• **Kingdom:** {K}",
+            f"• **Phylum:** {P}",
+            f"• **Class:** {C}",
+            f"• **Order:** {O}",
+            f"• **Family:** {F}",
+            f"• **Genus:** {G}",    
+        ]
+        src_hint = f"\n*from {src}*" if src else ""
+        if prov:
+            out.append(f"\n*(resolved via {prov})*")
+        if src_hint:
+            out.append(src_hint)
+        return "\n".join(out)
+
     def find_most_relevant_csv(self, query_lower: str):
         """Find the most relevant CSV file for a given query"""
         if not self.uploaded_files['csv_files']:
@@ -2894,12 +3760,12 @@ Microbiome interaction networks reveal important ecological patterns:
         """Intelligently handle any query about CSV data"""
         import re
         
-        # Extract column names and data types
+        # Extracts column names and data types
         columns = df.columns.tolist()
         numeric_columns = df.select_dtypes(include=['number']).columns.tolist()
         text_columns = df.select_dtypes(include=['object']).columns.tolist()
         
-        # 1. Handle specific column queries (but avoid generic column names in species queries)
+        # 1. Handles specific column queries (but avoid generic column names in species queries)
         for col in columns:
             if col.lower() in query_lower and not any(term in query_lower for term in ['unique_name', 'otu_id', 'species']):
                 return self.analyze_specific_column(df, col, filename, query_lower)
@@ -3011,7 +3877,7 @@ Microbiome interaction networks reveal important ecological patterns:
         
         result = f"**Unique Values Summary for {filename}:**\n\n"
         
-        for col in text_columns[:5]:  # Limit to first 5 columns
+        for col in text_columns[:5]:  # Limits to first 5 columns
             unique_count = df[col].nunique()
             result += f"📊 **{col}:** {unique_count} unique values\n"
         
@@ -3061,7 +3927,7 @@ Microbiome interaction networks reveal important ecological patterns:
         
         result = f"**Statistical Summary for {filename}:**\n\n"
         
-        for col in numeric_columns[:5]:  # Limit to first 5 numeric columns
+        for col in numeric_columns[:5]:  # Limits to first 5 numeric columns
             col_data = df[col].dropna()
             if len(col_data) > 0:
                 result += f"**{col}:**\n"
@@ -3082,7 +3948,7 @@ Microbiome interaction networks reveal important ecological patterns:
         quoted_terms = re.findall(r'["\']([^"\']*)["\']', query_lower)
         
         if not quoted_terms:
-            return "**Search Help for " + filename + ":**\\n\\nTo search the data, please specify search terms in quotes.\\nExample: 'find \"microvirga\"' or 'search \"bacteria\"'"
+            return (f"**Search Help for {filename}:**\n" "Please put your search term inside quotes.\n" "Example: 'find \"microvirga\"' or 'search \"bacteria\"'")
         
         search_term = quoted_terms[0]
         results = []
@@ -3154,13 +4020,13 @@ Microbiome interaction networks reveal important ecological patterns:
         
         return result
 
-# Initialize chatbot
+# This Initializes chatbot
 chatbot = MicrobiomeXAIChatbot()
 
 @app.route('/')
 def index():
     """Main chatbot interface"""
-    return render_template('index.html')
+    return render_template('chatbot.html')
 
 @app.route('/chat', methods=['POST'])
 def chat():
@@ -3169,7 +4035,7 @@ def chat():
     user_message = data.get('message', '')
     
     # Process the query
-    response = chatbot.process_user_query(user_message)
+    response = chatbot.process_user_query_with_files(user_message)
     
     if response == "SHUTDOWN_REQUESTED":
         shutdown_server()
@@ -3186,6 +4052,12 @@ def chat():
             'response': 'Generating depth plots...',
             'show_depth': True
             })
+
+    if response == "DELETE_SELECTED_CSVS":
+        return jsonify({
+            'response': 'Deleting selected CSV files...',
+            'delete_csvs': True
+        })
     
     # Add to chat history
     chatbot.chat_history.append({
@@ -3224,11 +4096,15 @@ def analyze():
             'data': otu_data,
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
+        print("Analysis started...")
         
         result = chatbot.analyze_microbiome_data(otu_data, depth)
+        print("Preprocessing complete...")
+        print("R analysis running...")
+        print("Results processed...")
         result['file_stored'] = True
         return jsonify(result)
-        
+               
     except Exception as e:
         return jsonify({'error': str(e)}), 400
 
@@ -3238,10 +4114,730 @@ def network():
     result = chatbot.generate_network_visualization()
     return jsonify(result)
 
+
+@app.route('/analyze_multiple', methods=['POST'])
+def analyze_multiple():
+    # Analyze multiple CSVs sent as JSON payload 
+    # Stores all CSVs and returns a summary message. 
+    try:
+        payload = request.json or {}
+        files = payload.get('files', [])
+        if not files or not isinstance(files, list):
+            return jsonify({'error': 'No files provided'}), 400
+
+        ingested = []
+        type_counts = {}
+        for item in files:
+            fname = item.get('filename', 'uploaded.csv')
+            df = pd.DataFrame(item.get('otu_data', {}))
+            chatbot.uploaded_files['csv_files'][fname] = {
+                'path': fname,
+                'data': df,
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            try:
+                csv_type = chatbot.detect_csv_type(df, fname)
+            except Exception:
+                csv_type = 'generic'
+            ingested.append({'filename': fname, 'rows': len(df), 'cols': len(df.columns), 'type': csv_type})
+            type_counts[csv_type] = type_counts.get(csv_type, 0) + 1
+
+        msg = "✅ Ingested {} file(s). ".format(len(ingested))
+        if type_counts:
+            msg += " Types: " + ", ".join(f"{k}×{v}" for k, v in type_counts.items()) + "."
+        msg += " You can now ask for summaries, filters, or visualize the network (if interaction data)."
+
+        return jsonify({'success': True, 'message': msg, 'ingested': ingested})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+
+@app.route('/analyze_pairwise', methods=['POST'])
+def analyze_pairwise():
+    # Pairwise analysis for exactly two CSVs. If types match (interactions/taxonomy/mapping),
+    # use existing comparators; otherwise just ingest both.
+    try:
+        payload = request.json or {}
+        files = payload.get('files', [])
+        if not files or len(files) != 2:
+            return jsonify({'error': 'Exactly two files are required for pairwise analysis'}), 400
+
+        dfs = []
+        meta = []
+        for item in files:
+            fname = item.get('filename', 'uploaded.csv')
+            df = pd.DataFrame(item.get('otu_data', {}))
+            chatbot.uploaded_files['csv_files'][fname] = {
+                'path': fname,
+                'data': df,
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            try:
+                csv_type = chatbot.detect_csv_type(df, fname)
+            except Exception:
+                csv_type = 'generic'
+            dfs.append(df)
+            meta.append({'filename': fname, 'type': csv_type, 'rows': len(df), 'cols': len(df.columns)})
+
+        t1, t2 = meta[0]['type'], meta[1]['type']
+
+        if t1 == t2 == 'interactions':
+            res = chatbot.compare_interactions(dfs[0], dfs[1])
+            return jsonify({'success': True, 'pairwise_type': 'interactions', 'message': 'Compared interaction tables.', 'comparison': res, 'files': meta})
+        elif t1 == t2 == 'taxonomy':
+            res = chatbot.compare_taxonomy(dfs[0], dfs[1])
+            return jsonify({'success': True, 'pairwise_type': 'taxonomy', 'message': 'Compared taxonomy tables.', 'comparison': res, 'files': meta})
+        elif t1 == t2 == 'mapping':
+            res = chatbot.compare_mappings(dfs[0], dfs[1])
+            return jsonify({'success': True, 'pairwise_type': 'mapping', 'message': 'Compared mapping tables.', 'comparison': res, 'files': meta})
+        else:
+            return jsonify({
+                'success': True,
+                'pairwise_type': 'ingested',
+                'message': 'Files ingested. Types differ or are not pairwise-comparable. You can still query each or run single-file analyses.',
+                'files': meta
+            })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+
+@app.route('/preview_csvs', methods=['POST'])
+def preview_csvs():
+    # Return a preview (first N rows) for selected CSVs already uploaded.
+    try:
+        payload = request.json or {}
+        names = payload.get('filenames', [])
+        if not names:
+            return jsonify({'success': False, 'error': 'No filenames provided'}), 400
+
+        previews = []
+        for name in names:
+            info = chatbot.uploaded_files['csv_files'].get(name)
+            if not info:
+                match = None
+                for k in chatbot.uploaded_files['csv_files'].keys():
+                    if k.lower() == str(name).lower():
+                        match = chatbot.uploaded_files['csv_files'][k]
+                        name = k
+                        break
+                info = match
+            if not info:
+                previews.append({'filename': name, 'error': 'Not found'})
+                continue
+            df = info.get('data')
+            try:
+                csv_type = chatbot.detect_csv_type(df, name)
+            except Exception:
+                csv_type = 'generic'
+            head = df.head(30) if hasattr(df, 'head') else df
+            previews.append({
+                'filename': name,
+                'csv_type': csv_type,
+                'columns': list(head.columns) if hasattr(head, 'columns') else [],
+                'rows': head.to_dict(orient='records') if hasattr(head, 'to_dict') else []
+            })
+
+        return jsonify({'success': True, 'previews': previews})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+
+@app.route('/compare_csvs', methods=['POST'])
+def compare_csvs():
+    """
+    Compare exactly two already-uploaded CSVs (selected in the UI).
+    Returns:
+      {
+        success: true,
+        summary: { file_a: {...}, file_b: {...} },
+        schema:  { shared_columns: [...], only_in_a: [...], only_in_b: [...] },
+        taxon:   {
+          column_used: "species_name" | "unique_name" | "otu_id" | ... | None,
+          overlap_count: int, only_in_a_count: int, only_in_b_count: int,
+          sample: { overlap:[..], only_in_a:[..], only_in_b:[..] }   # small examples
+        }
+      }
+    """
+    try:
+        payload = request.json or {}
+        names = payload.get('filenames', [])
+        if not isinstance(names, list) or len(names) != 2:
+            return jsonify({'success': False, 'error': 'Please provide exactly two filenames.'}), 400
+
+        # Fetch dataframes from uploaded store
+        def get_df_by_name(name):
+            # exact match first
+            info = chatbot.uploaded_files['csv_files'].get(name)
+            if info: 
+                return info.get('data'), name
+            # case-insensitive fallback
+            for k, v in chatbot.uploaded_files['csv_files'].items():
+                if k.lower() == str(name).lower():
+                    return v.get('data'), k
+            return None, name
+
+        df_a, name_a = get_df_by_name(names[0])
+        df_b, name_b = get_df_by_name(names[1])
+
+        if df_a is None:
+            return jsonify({'success': False, 'error': f'Not found: {name_a}'}), 404
+        if df_b is None:
+            return jsonify({'success': False, 'error': f'Not found: {name_b}'}), 404
+
+        # --- summary
+        def short_label(n):
+            base = os.path.basename(n)
+            return os.path.splitext(base)[0]
+
+        summary = {
+            'file_a': {
+                'filename': name_a,
+                'short': short_label(name_a),
+                'rows': int(getattr(df_a, 'shape', (0,0))[0]),
+                'cols': int(getattr(df_a, 'shape', (0,0))[1]),
+                'type': getattr(chatbot, 'detect_csv_type', lambda d, fn: 'generic')(df_a, name_a)
+            },
+            'file_b': {
+                'filename': name_b,
+                'short': short_label(name_b),
+                'rows': int(getattr(df_b, 'shape', (0,0))[0]),
+                'cols': int(getattr(df_b, 'shape', (0,0))[1]),
+                'type': getattr(chatbot, 'detect_csv_type', lambda d, fn: 'generic')(df_b, name_b)
+            }
+        }
+
+        # --- schema (column) comparison
+        cols_a = list(df_a.columns)
+        cols_b = list(df_b.columns)
+        shared = sorted(list(set(cols_a) & set(cols_b)))
+        only_a = sorted(list(set(cols_a) - set(cols_b)))
+        only_b = sorted(list(set(cols_b) - set(cols_a)))
+        schema = {
+            'shared_columns': shared,
+            'only_in_a': only_a,
+            'only_in_b': only_b
+        }
+
+        # --- taxon/feature overlap by a best-ID column
+
+        def pick_id_column(a_cols, b_cols):
+            # preference order (kept from your original logic)
+            candidates = [
+                'unique_name','species_name','taxon','taxa','feature','feature_id',
+                'otu_id','asv','asv_id','otu','id','name','genus','species'
+            ]
+            a_lower = {c.lower(): c for c in a_cols}
+            b_lower = {c.lower(): c for c in b_cols}
+            for cand in candidates:
+                if cand in a_lower and cand in b_lower:
+                    # actual names in each + normalized key
+                    return a_lower[cand], b_lower[cand], cand
+            return None, None, None
+
+        def _string_set(series):
+
+            return set(str(x).strip() for x in series.dropna().astype(str).unique())
+
+        def auto_match_id_columns(df_a, df_b):
+            """
+            Generalized matcher for any pair of CSVs.
+            Handles:
+              - interactions (sp1/sp2) ↔ taxonomy/mapping/otu
+              - otu_table (OTU_ID/ASV) ↔ mapping/taxonomy/otu_table
+              - generic best string-column pair (Jaccard)
+            Returns: (col_a, col_b, description) or (None, None, None)
+            """
+            cols_a = list(df_a.columns)
+            cols_b = list(df_b.columns)
+            lower_a = {c.lower(): c for c in cols_a}
+            lower_b = {c.lower(): c for c in cols_b}
+
+            # === Case 1: Interactions (sp1 & sp2) on A → match against best column in B
+            if {'sp1','sp2'}.issubset(set(lower_a.keys())):
+                s1 = _string_set(df_a[lower_a['sp1']])
+                s2 = _string_set(df_a[lower_a['sp2']])
+                idset_a = s1 | s2
+                best = (0.0, None)
+                for col in cols_b:
+                    vals_b = _string_set(df_b[col])
+                    if not vals_b:
+                        continue
+                    jacc = len(idset_a & vals_b) / max(1, len(idset_a | vals_b))
+                    if jacc > best[0]:
+                        best = (jacc, col)
+                if best[1] and best[0] > 0.01:
+                    return ('sp1|sp2', best[1], f'union(sp1,sp2) ↔ {best[1]}')
+
+            # === Case 2: OTU/ASV IDs on A → match against best ID/name column in B
+            for key in ['otu_id','asv','asv_id','otu','id','name']:
+                if key in lower_a:
+                    col_a = lower_a[key]
+                    set_a = _string_set(df_a[col_a])
+                    if not set_a:
+                        continue
+                    best = (0.0, None)
+                    for col in cols_b:
+                        vals_b = _string_set(df_b[col])
+                        if not vals_b:
+                            continue
+                        jacc = len(set_a & vals_b) / max(1, len(set_a | vals_b))
+                        if jacc > best[0]:
+                            best = (jacc, col)
+                    if best[1] and best[0] > 0.01:
+                        return (col_a, best[1], f'{col_a} ↔ {best[1]}')
+
+            # === Case 3: Generic fallback (try every string-like column pair)
+            best_overlap, best_pair = 0.0, None
+            for col_a in cols_a:
+                vals_a = _string_set(df_a[col_a])
+                if not vals_a:
+                    continue
+                for col_b in cols_b:
+                    vals_b = _string_set(df_b[col_b])
+                    if not vals_b:
+                        continue
+                    jacc = len(vals_a & vals_b) / max(1, len(vals_a | vals_b))
+                    if jacc > best_overlap:
+                        best_overlap, best_pair = jacc, (col_a, col_b)
+            if best_pair and best_overlap > 0.01:
+                ca, cb = best_pair
+                return ca, cb, f'{ca} ↔ {cb}'
+
+            return None, None, None
+
+        # Try your original exact/shared-key matcher first
+        col_a, col_b, _norm = pick_id_column(cols_a, cols_b)
+
+        # If no obvious shared column, fall back to the generalized auto matcher
+        if not (col_a and col_b):
+            col_a, col_b, desc = auto_match_id_columns(df_a, df_b)
+        else:
+            desc = (col_a if col_a == col_b else f'{col_a}|{col_b}')
+
+        # Build the taxon/feature overlap result
+        taxon = {
+            'column_used': None,
+            'overlap_count': 0,
+            'only_in_a_count': 0,
+            'only_in_b_count': 0,
+            'sample': {}
+        }
+
+        if col_a and col_b:
+            # Support union(sp1, sp2) when requested
+            if col_a == 'sp1|sp2':
+                a_vals = _string_set(df_a['sp1']) | _string_set(df_a['sp2'])
+            else:
+                a_vals = _string_set(df_a[col_a])
+            b_vals = _string_set(df_b[col_b])
+
+            overlap = sorted(list(a_vals & b_vals))
+            only_a_vals = sorted(list(a_vals - b_vals))
+            only_b_vals = sorted(list(b_vals - a_vals))
+
+            taxon.update({
+                'column_used': desc,
+                'overlap_count': len(overlap),
+                'only_in_a_count': len(only_a_vals),
+                'only_in_b_count': len(only_b_vals),
+                'sample': {
+                    'overlap': overlap[:10],
+                    'only_in_a': only_a_vals[:10],
+                    'only_in_b': only_b_vals[:10]
+                }
+            })
+        else:
+            # leave as None when no overlapping ID space exists
+            taxon.update({'column_used': None})
+
+        
+        # 1. Data Quality Metrics
+        data_quality = {
+            'missing_values': {
+                'file_a': int(df_a.isnull().sum().sum()),
+                'file_b': int(df_b.isnull().sum().sum()),
+                'shared_columns_missing': {col: {'file_a': int(df_a[col].isnull().sum()), 'file_b': int(df_b[col].isnull().sum())} for col in shared[:5]}
+            },
+            'duplicate_rows': {
+                'file_a': int(df_a.duplicated().sum()),
+                'file_b': int(df_b.duplicated().sum())
+            },
+            'data_types_match': len([c for c in shared if str(df_a[c].dtype) == str(df_b[c].dtype)]),
+            'completeness_ratio': {
+                'file_a': float(1 - df_a.isnull().sum().sum() / df_a.size),
+                'file_b': float(1 - df_b.isnull().sum().sum() / df_b.size)
+            }
+        }
+        
+        # 2. Statistical Analysis
+        numeric_shared = [
+            col for col in shared
+            if pd.api.types.is_numeric_dtype(df_a[col]) and pd.api.types.is_numeric_dtype(df_b[col])
+        ]
+        statistics = {
+            'numeric_columns_count': len(numeric_shared),
+            'correlations': {},
+            'mean_differences': {},
+            'variance_ratios': {}
+        }
+        
+        for col in numeric_shared[:10]:  # Limit to first 10 numeric columns
+            try:
+                if len(df_a[col].dropna()) > 1 and len(df_b[col].dropna()) > 1:
+                    # Align indices for correlation
+                    common_idx = df_a.index.intersection(df_b.index)
+                    if len(common_idx) > 1:
+                        corr = float(df_a.loc[common_idx, col].corr(df_b.loc[common_idx, col]))
+                        statistics['correlations'][col] = corr if not np.isnan(corr) else 0.0
+                    
+                    mean_a, mean_b = float(df_a[col].mean()), float(df_b[col].mean())
+                    statistics['mean_differences'][col] = abs(mean_a - mean_b)
+                    
+                    var_a, var_b = float(df_a[col].var()), float(df_b[col].var())
+                    if var_b != 0:
+                        statistics['variance_ratios'][col] = var_a / var_b
+            except:
+                continue
+        
+       
+        plots = {}
+
+        # 1) ID overlap bar (if we found an ID column pair)
+        if taxon.get('column_used'):
+            plots['overlap_bar'] = {
+                "data": [{
+            "type": "bar",
+            "x": ["Only in A", "Overlap", "Only in B"],
+            "y": [
+                taxon.get('only_in_a_count', 0),
+                taxon.get('overlap_count', 0),
+                taxon.get('only_in_b_count', 0)
+            ],
+            "text": [
+                taxon.get('only_in_a_count', 0),
+                taxon.get('overlap_count', 0),
+                taxon.get('only_in_b_count', 0)
+            ],
+            "textposition": "auto",
+            "hovertemplate": "%{x}: %{y}<extra></extra>"
+        }],
+        "layout": {
+            "title": f"ID Overlap — {taxon.get('column_used')}",
+            "yaxis": {"title": "Count"},
+            "margin": {"l": 60, "r": 10, "t": 50, "b": 40}
+        }
+    }
+
+        # 2) Correlation bar (from statistics)
+        if statistics['correlations']:
+            pairs = sorted(statistics['correlations'].items(), key=lambda x: abs(x[1]), reverse=True)
+            plots['corr_bar'] = {
+        "data": [{
+            "type": "bar",
+            "x": [p[0] for p in pairs],
+            "y": [round(p[1], 4) for p in pairs],
+            "hovertemplate": "%{x}: %{y}<extra></extra>"
+        }],
+        "layout": {
+            "title": "Column Correlations (shared numeric)",
+            "xaxis": {"title": "Column"},
+            "yaxis": {"title": "Correlation", "range": [-1, 1]},
+            "margin": {"l": 60, "r": 10, "t": 50, "b": 80}
+        }
+    }
+
+        # 3) Degree histogram if File A looks like interactions (sp1/sp2)
+        cols_a_lower = {c.lower() for c in df_a.columns}
+        if {'sp1','sp2'}.issubset(cols_a_lower):
+            s1 = df_a[[c for c in df_a.columns if c.lower() == 'sp1'][0]].astype(str)
+            s2 = df_a[[c for c in df_a.columns if c.lower() == 'sp2'][0]].astype(str)
+            deg = (s1.value_counts().add(s2.value_counts(), fill_value=0)).astype(int)
+            plots['degree_hist'] = {
+        "data": [{
+            "type": "histogram",
+            "x": deg.values.tolist(),
+            "nbinsx": 30,
+            "hovertemplate": "Degree: %{x}<extra></extra>"
+        }],
+        "layout": {
+            "title": "Interaction Network — Node Degree Distribution (File A)",
+            "xaxis": {"title": "Degree"},
+            "yaxis": {"title": "Frequency"},
+            "margin": {"l": 60, "r": 10, "t": 50, "b": 40}
+        }
+    }
+        
+        shared_lower = {c.lower(): c for c in shared}
+        # 3. Taxonomic Hierarchy Analysis
+        taxonomy_levels = ['kingdom', 'phylum', 'class', 'order', 'family', 'genus', 'species']
+        taxonomy_analysis = {
+            'available_levels': [level for level in taxonomy_levels if level in shared],
+            'level_overlap': {}
+        }
+        
+        for level in taxonomy_levels:
+            if level in shared:
+                try:
+                    set_a = set(str(x).strip() for x in df_a[level].dropna().astype(str).unique())
+                    set_b = set(str(x).strip() for x in df_b[level].dropna().astype(str).unique())
+                    overlap_vals = sorted(list(set_a & set_b))
+                    unique_a_vals = sorted(list(set_a - set_b))
+                    unique_b_vals = sorted(list(set_b - set_a))
+                    
+                    taxonomy_analysis['level_overlap'][level] = {
+                        'shared_count': len(overlap_vals),
+                        'unique_a_count': len(unique_a_vals),
+                        'unique_b_count': len(unique_b_vals),
+                        'jaccard_similarity': len(overlap_vals) / len(set_a | set_b) if len(set_a | set_b) > 0 else 0,
+                        'sample_shared': overlap_vals[:5],
+                        'sample_unique_a': unique_a_vals[:5],
+                        'sample_unique_b': unique_b_vals[:5]
+                    }
+                except:
+                    continue
+        
+        # 4. Distribution Analysis
+        numeric_cols_a = df_a.select_dtypes(include=[np.number]).columns
+        numeric_cols_b = df_b.select_dtypes(include=[np.number]).columns
+        
+        distribution_analysis = {
+            'abundance_ranges': {
+                'file_a': {
+                    'min': float(df_a[numeric_cols_a].min().min()) if len(numeric_cols_a) > 0 else 0,
+                    'max': float(df_a[numeric_cols_a].max().max()) if len(numeric_cols_a) > 0 else 0,
+                    'median': float(df_a[numeric_cols_a].median().median()) if len(numeric_cols_a) > 0 else 0
+                },
+                'file_b': {
+                    'min': float(df_b[numeric_cols_b].min().min()) if len(numeric_cols_b) > 0 else 0,
+                    'max': float(df_b[numeric_cols_b].max().max()) if len(numeric_cols_b) > 0 else 0,
+                    'median': float(df_b[numeric_cols_b].median().median()) if len(numeric_cols_b) > 0 else 0
+                }
+            },
+            'zero_abundance_ratio': {
+                'file_a': float((df_a[numeric_cols_a] == 0).sum().sum() / df_a[numeric_cols_a].size) if len(numeric_cols_a) > 0 and df_a[numeric_cols_a].size > 0 else 0,
+                'file_b': float((df_b[numeric_cols_b] == 0).sum().sum() / df_b[numeric_cols_b].size) if len(numeric_cols_b) > 0 and df_b[numeric_cols_b].size > 0 else 0
+            },
+            'sparsity_comparison': {
+                'file_a_sparse': float((df_a[numeric_cols_a] == 0).sum().sum() / df_a[numeric_cols_a].size > 0.5) if len(numeric_cols_a) > 0 else False,
+                'file_b_sparse': float((df_b[numeric_cols_b] == 0).sum().sum() / df_b[numeric_cols_b].size > 0.5) if len(numeric_cols_b) > 0 else False
+            }
+        }
+        
+        # 5. Sample/Column Similarity
+        jaccard_sim = len(set(df_a.columns) & set(df_b.columns)) / len(set(df_a.columns) | set(df_b.columns)) if len(set(df_a.columns) | set(df_b.columns)) > 0 else 0
+        
+        sample_analysis = {
+            'column_overlap_count': len(shared),
+            'jaccard_similarity': float(jaccard_sim),
+            'similarity_category': 'high' if jaccard_sim > 0.7 else 'medium' if jaccard_sim > 0.4 else 'low',
+            'total_unique_columns': len(set(df_a.columns) | set(df_b.columns)),
+            'column_overlap_percentage': float(len(shared) / len(set(df_a.columns) | set(df_b.columns)) * 100) if len(set(df_a.columns) | set(df_b.columns)) > 0 else 0
+        }
+        
+        # 6. Diversity Metrics (for microbiome data)
+        def calculate_shannon_diversity(df_numeric):
+            if df_numeric.empty:
+                return 0
+            # Calculate Shannon diversity for each sample (column)
+            diversities = []
+            for col in df_numeric.columns:
+                abundances = df_numeric[col].values
+                abundances = abundances[abundances > 0]  # Remove zeros
+                if len(abundances) > 0:
+                    proportions = abundances / abundances.sum()
+                    shannon = -np.sum(proportions * np.log(proportions))
+                    diversities.append(shannon)
+            return float(np.mean(diversities)) if diversities else 0
+        
+        diversity_metrics = {
+            'shannon_diversity': {
+                'file_a': calculate_shannon_diversity(df_a[numeric_cols_a]) if len(numeric_cols_a) > 0 else 0,
+                'file_b': calculate_shannon_diversity(df_b[numeric_cols_b]) if len(numeric_cols_b) > 0 else 0
+            },
+            'richness': {
+                'file_a': int((df_a[numeric_cols_a] > 0).sum().sum()) if len(numeric_cols_a) > 0 else 0,
+                'file_b': int((df_b[numeric_cols_b] > 0).sum().sum()) if len(numeric_cols_b) > 0 else 0
+            },
+            'total_features': {
+                'file_a': len(df_a),
+                'file_b': len(df_b)
+            }
+        }
+        
+        # 7. Visualization Data
+        visualization_data = {
+            'venn_diagram': {
+                'overlap': len(overlap) if 'overlap' in locals() else 0,
+                'only_a': len(only_a_vals) if 'only_a_vals' in locals() else 0,
+                'only_b': len(only_b_vals) if 'only_b_vals' in locals() else 0,
+                'total_unique': len((a_vals | b_vals)) if 'a_vals' in locals() and 'b_vals' in locals() else 0
+            },
+            'correlation_summary': {
+                'high_correlation_count': len([v for v in statistics['correlations'].values() if abs(v) > 0.7]),
+                'medium_correlation_count': len([v for v in statistics['correlations'].values() if 0.3 < abs(v) <= 0.7]),
+                'low_correlation_count': len([v for v in statistics['correlations'].values() if abs(v) <= 0.3])
+            }
+        }
+        
+        # 8. Smart Recommendations
+        recommendations = {
+            'data_compatibility': sample_analysis['similarity_category'],
+            'merge_feasibility': 'feasible' if jaccard_sim > 0.5 else 'challenging' if jaccard_sim > 0.2 else 'difficult',
+            'suggested_actions': [],
+            'quality_score': float((data_quality['completeness_ratio']['file_a'] + data_quality['completeness_ratio']['file_b']) / 2)
+        }
+        
+        # Generate specific recommendations
+        if data_quality['missing_values']['file_a'] > df_a.size * 0.1 or data_quality['missing_values']['file_b'] > df_b.size * 0.1:
+            recommendations['suggested_actions'].append('Handle missing values before analysis')
+        
+        # Check for division by zero before comparing abundance ranges
+        max_a = distribution_analysis['abundance_ranges']['file_a']['max']
+        max_b = distribution_analysis['abundance_ranges']['file_b']['max']
+        if max_a > 0 and max_b > 0:
+            if max_a / max_b > 10 or max_b / max_a > 10:
+                recommendations['suggested_actions'].append('Consider normalizing abundance values')
+        
+        if len(statistics['correlations']) > 0 and np.mean(list(statistics['correlations'].values())) < 0.3:
+            recommendations['suggested_actions'].append('Check for batch effects or systematic differences')
+        
+        if jaccard_sim < 0.3:
+            recommendations['suggested_actions'].append('Files have low overlap - verify they are comparable datasets')
+        
+        if not recommendations['suggested_actions']:
+            recommendations['suggested_actions'].append('Files appear compatible for analysis')
+
+
+        def _numeric_cols(df):
+            return [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+
+        def _as_comp_sorted(values: pd.Series) -> np.ndarray:
+            """Coerce to numeric, clip negatives to 0, normalize to composition, sort desc."""
+            arr = pd.to_numeric(values, errors='coerce').fillna(0.0).to_numpy(dtype=float)
+            # no negatives in counts
+            arr = np.clip(arr, 0, None)
+            s = arr.sum()
+            if s > 0:
+                arr = arr / s
+            # sorts descending for an ID-agnostic rank-abundance comparison
+            return np.sort(arr)[::-1]
+
+        def _pad_to_same_len(a: np.ndarray, b: np.ndarray):
+            if len(a) == len(b): return a, b
+            if len(a) < len(b):
+                a = np.pad(a, (0, len(b)-len(a)), mode='constant')
+            else:
+                b = np.pad(b, (0, len(a)-len(b)), mode='constant')
+            return a, b
+
+        def _spearman_from_arrays(x: np.ndarray, y: np.ndarray):
+            if len(x) < 2 or len(y) < 2: return float('nan')
+            # Spearman via rank + Pearson
+            rx = pd.Series(x).rank(method='average')
+            ry = pd.Series(y).rank(method='average')
+            rho = rx.corr(ry)
+            return float(rho) if pd.notna(rho) else float('nan')
+
+        numeric_fallback = None
+        # Only invoke fallback if we **did not** find a usable ID column pair
+        if not taxon.get('column_used'):
+            num_a = _numeric_cols(df_a)
+            num_b = _numeric_cols(df_b)
+            shared_samples = [c for c in num_a if c in num_b]
+
+            per_sample = []
+            for col in shared_samples:
+                xa = _as_comp_sorted(df_a[col])
+                xb = _as_comp_sorted(df_b[col])
+                xa, xb = _pad_to_same_len(xa, xb)
+
+                # Bray–Curtis dissimilarity 
+                # Similarity = 1 - D (It is nicer for bar plots where higher is better)
+                bc_diss = float(0.5 * np.abs(xa - xb).sum())
+                bc_sim  = float(1.0 - bc_diss)
+
+                rho = _spearman_from_arrays(xa, xb)
+                # Pearson on shapes 
+                pear = float(pd.Series(xa).corr(pd.Series(xb))) if len(xa) > 1 else float('nan')
+
+                per_sample.append({
+                    "sample": col,
+                    "bray_curtis_dissimilarity": bc_diss,
+                    "bray_curtis_similarity": bc_sim,
+                    "spearman": rho,
+                    "pearson": pear
+                })
+
+            if per_sample:
+                numeric_fallback = {
+                    "shared_samples": shared_samples,
+                    "per_sample": per_sample,
+                    "summary": {
+                        "mean_bray_curtis_dissimilarity": float(np.mean([d["bray_curtis_dissimilarity"] for d in per_sample])),
+                        "mean_bray_curtis_similarity":   float(np.mean([d["bray_curtis_similarity"]   for d in per_sample])),
+                        "mean_spearman":                 float(np.nanmean([d["spearman"]               for d in per_sample])),
+                        "mean_pearson":                  float(np.nanmean([d["pearson"]                for d in per_sample]))
+                    }
+                }
+
+                
+                samples   = [d["sample"] for d in per_sample]
+                bc_sim    = [round(d["bray_curtis_similarity"], 6) for d in per_sample]
+                rho_vals  = [None if np.isnan(d["spearman"]) else round(d["spearman"], 6) for d in per_sample]
+
+                plots['per_sample_bray'] = {
+                    "data": [{
+                        "type": "bar",
+                        "x": samples,
+                        "y": bc_sim,
+                        "hovertemplate": "%{x}: %{y:.3f}<extra></extra>"
+                    }],
+                    "layout": {
+                        "title": "Per-sample Similarity (1 − Bray–Curtis) — no row ID match",
+                        "xaxis": {"title": "Sample", "automargin": True},
+                        "yaxis": {"title": "Similarity (higher = more similar)", "range": [0, 1]},
+                        "margin": {"l": 60, "r": 10, "t": 50, "b": 80}
+                    }
+                }
+
+                plots['per_sample_spearman'] = {
+                    "data": [{
+                        "type": "bar",
+                        "x": samples,
+                        "y": rho_vals,
+                        "hovertemplate": "%{x}: ρ=%{y:.3f}<extra></extra>"
+                    }],
+                    "layout": {
+                        "title": "Per-sample Spearman (rank-abundance) — no row ID match",
+                        "xaxis": {"title": "Sample", "automargin": True},
+                        "yaxis": {"title": "ρ", "range": [-1, 1]},
+                        "margin": {"l": 60, "r": 10, "t": 50, "b": 80}
+                    }
+                }
+
+        return jsonify({
+            'success': True, 
+            'summary': summary, 
+            'schema': schema, 
+            'taxon': taxon,
+            'data_quality': data_quality,
+            'statistics': statistics,
+            'taxonomy_analysis': taxonomy_analysis,
+            'distribution_analysis': distribution_analysis,
+            'sample_analysis': sample_analysis,
+            'diversity_metrics': diversity_metrics,
+            'visualization_data': visualization_data,
+            'recommendations': recommendations,
+            'numeric_fallback': numeric_fallback,
+            'plots': plots
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+
+
 @app.route('/history')
 def history():
     """Get chat history"""
-    return jsonify(chatbot.chat_history)
+    return jsonify({'success': True, 'chat_history': chatbot.chat_history})
 
 @app.route('/filter_interactions', methods=['POST'])
 def filter_interactions():
@@ -3281,7 +4877,7 @@ def upload_depth():
         if not hasattr(chatbot, 'uploaded_files'):
             chatbot.uploaded_files = {'csv_files': {}, 'pdf_files': {}}
 
-        # ✅ register the uploaded file in-memory so depth queries work immediately
+        # Registers the uploaded file in-memory so depth queries work immediately
         chatbot.uploaded_files['csv_files']['depth.csv'] = {
             'path': DEPTH_CSV_DEFAULT,
             'data': chatbot.depth_df.copy(),
@@ -3318,7 +4914,7 @@ def upload_file():
             result = chatbot.process_pdf_file(filename, file_path)
         elif file_ext in ['csv', 'tsv', 'txt']:
             # Process CSV file
-            result = chatbot.analyze_csv_file(filename, file_path)
+            result = chatbot.analyze_csv_file(file_path)
         else:
             return jsonify({'success': False, 'error': 'Unsupported file type'}), 400
         
@@ -3404,7 +5000,7 @@ def upload_multiple_pdfs():
                 file_ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
                 
                 if file_ext != 'pdf':
-                    continue  # Skip non-PDF files
+                    continue  # Skips non-PDF files
                 
                 # Save file
                 file_path = os.path.join(chatbot.upload_dir, filename)
@@ -3452,6 +5048,110 @@ def shutdown_server():
     if func is None:
         raise RuntimeError('Not running with the Werkzeug Server')
     func()
+
+
+@app.route('/health', methods=['GET'])
+def health():
+    exists = {
+        'DATA_DIR': os.path.isdir(getattr(chatbot, 'data_dir', 'data')),
+        'UPLOAD_DIR': os.path.isdir(getattr(chatbot, 'upload_dir', 'uploads'))
+    }
+    return jsonify({'ok': True, 'exists': exists})
+
+@app.route('/docs', methods=['GET'])
+def docs():
+    return jsonify({
+        "app": "Microbiome XAI Chatbot (Pro v3)",
+        "endpoints": [
+            "/", "/chat", "/upload_file", "/get_uploaded_files",
+            "/history", "/clear_history",
+            "/compare_interactions", "/compare_taxonomy", "/compare_mappings",
+            "/health", "/docs"
+        ]
+    })
+
+@app.route('/compare_interactions', methods=['GET'])
+def compare_interactions_route():
+    a = request.args.get('a', 'interactions_enhanced')
+    b = request.args.get('b', 'interactions_short')
+    a_df, a_name = chatbot._load_csv_from_known_locations(a)
+    b_df, b_name = chatbot._load_csv_from_known_locations(b)
+    if a_df is None or b_df is None:
+        return jsonify({"success": False, "error": f"Could not find both CSVs: a='{a}', b='{b}'"}), 400
+    res = chatbot.compare_interactions(a_df, b_df)
+    return jsonify({"success": True, "a": a_name, "b": b_name, **res})
+
+@app.route('/compare_taxonomy', methods=['GET'])
+def compare_taxonomy_route():
+    a = request.args.get('a', 'taxonomy')
+    b = request.args.get('b', 'taxonomy_table')
+    a_df, a_name = chatbot._load_csv_from_known_locations(a)
+    b_df, b_name = chatbot._load_csv_from_known_locations(b)
+    if a_df is None or b_df is None:
+        return jsonify({"success": False, "error": f"Could not find two taxonomy CSVs to compare (a='{a}', b='{b}')."}), 400
+    res = chatbot.compare_taxonomy(a_df, b_df)
+    return jsonify({"success": True, "a": a_name, "b": b_name, **res})
+
+@app.route('/compare_mappings', methods=['GET'])
+def compare_mappings_route():
+    a = request.args.get('a', 'mapping')
+    b = request.args.get('b', 'augmented')
+    a_df, a_name = chatbot._load_csv_from_known_locations(a)
+    b_df, b_name = chatbot._load_csv_from_known_locations(b)
+    if a_df is None or b_df is None:
+        return jsonify({"success": False, "error": f"Could not find two mapping CSVs to compare (a='{a}', b='{b}')."}), 400
+    res = chatbot.compare_mappings(a_df, b_df)
+    return jsonify({"success": True, "a": a_name, "b": b_name, **res})
+
+@app.route('/explain_detailed', methods=['POST'])
+def explain_detailed():
+    data = request.get_json(force=True)
+    s1 = data.get('species1'); s2 = data.get('species2'); inferred = data.get('label', 'Unknown')
+    trace = chatbot.proof_trace_for_interaction(s1, s2, inferred)
+    return jsonify({'success': 'error' not in trace, **trace})
+
+@app.route('/network_null_test', methods=['GET'])
+def network_null_test():
+    out = chatbot.network_null_significance(num_draws=int(request.args.get('n', 200)))
+    return jsonify({'success': 'error' not in out, **out})
+
+@app.route('/delete_csvs', methods=['POST'])
+def delete_csvs():
+    """Delete selected CSV files"""
+    try:
+        data = request.json
+        filenames = data.get('filenames', [])
+        
+        if not filenames:
+            return jsonify({'success': False, 'error': 'No filenames provided'}), 400
+        
+        deleted_files = []
+        errors = []
+        
+        for filename in filenames:
+            try:
+                # Remove from uploaded_files
+                if filename in chatbot.uploaded_files['csv_files']:
+                    del chatbot.uploaded_files['csv_files'][filename]
+                    deleted_files.append(filename)
+                else:
+                    errors.append(f"File '{filename}' not found")
+            except Exception as e:
+                errors.append(f"Error deleting '{filename}': {str(e)}")
+        
+        return jsonify({
+            'success': True,
+            'deleted_files': deleted_files,
+            'errors': errors,
+            'message': f"Deleted {len(deleted_files)} file(s)"
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.get("/chat_help")
+def chat_help():
+    return jsonify({"ok": True, "message": "Chatbot online."})
 
 if __name__ == '__main__':
     app.run(debug=False, host='0.0.0.0', port=5000, threaded=False, use_reloader=False)
