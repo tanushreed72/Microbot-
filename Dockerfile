@@ -2,6 +2,9 @@
     FROM python:3.11-slim
 
     ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+    ENV MAKEFLAGS=-j4
+    # Make reticulate use container Python
+    ENV RETICULATE_PYTHON=/usr/local/bin/python3
     
     # System + R toolchain
     RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -9,21 +12,37 @@
         r-base r-base-dev \
         libxml2-dev libcurl4-openssl-dev libssl-dev \
         git make g++ pkg-config \
-     && rm -rf /var/lib/apt/lists/*
+      && rm -rf /var/lib/apt/lists/*
     
-    # Workdir
+    # Optional but speeds builds: preinstall igraph binary
+    RUN apt-get update && apt-get install -y --no-install-recommends \
+        r-cran-igraph \
+      && rm -rf /var/lib/apt/lists/*
+    
+    # ---------- set workdir ----------
     WORKDIR /app
     
-    # Python deps first (cache-friendly)
+    # ---------- Python deps (cache-friendly) ----------
     COPY requirements.txt .
     RUN pip install --no-cache-dir -r requirements.txt
     
-    # Copy the whole repo (contains your R package + Flask app + templates)
-    COPY . .
+    # ---------- R package install (cache-friendly) ----------
+    # Copy only the R package sources first so this layer caches unless R code changes
+    # (Assuming your package is at repo root with DESCRIPTION/NAMESPACE and R/ folder)
+    COPY DESCRIPTION NAMESPACE ./
+    COPY R ./R
+    # If you have inst/, man/, etc., include them too for a complete install:
+    COPY inst ./inst
+    COPY man ./man
     
-    # Install your R package from this repo (since it has DESCRIPTION/NAMESPACE)
-    RUN R -q -e "install.packages('remotes', repos='https://cloud.r-project.org')" \
-     && R -q -e "remotes::install_local('.', upgrade='never', dependencies=TRUE)"
+    RUN R -q -e "options(warn=2); install.packages('remotes', repos='https://cloud.r-project.org')" \
+     && R -q -e "options(warn=2); install.packages(c('plyr','pulsar','reticulate'), repos='https://cloud.r-project.org')" \
+     && R -q -e "options(warn=2); remotes::install_local('.', upgrade='never', dependencies=TRUE)" \
+     && R -q -e "library(InfIntE); cat('InfIntE installed: ', as.character(packageVersion('InfIntE')), '\n')"
+    
+    # ---------- App code ----------
+    # Now copy the rest of the repo (Flask app, templates, static, etc.)
+    COPY . .
     
     # Runtime env
     ENV PORT=8080 \
